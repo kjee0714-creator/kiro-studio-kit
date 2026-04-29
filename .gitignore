@@ -1,0 +1,8 @@
+node_modules/
+dist/
+outputs/kiro-prompt.md
+outputs/public-log-template.md
+outputs/test/
+.studio/experiments.jsonl
+.studio/token-ledger.jsonl
+*.tsbuildinfo

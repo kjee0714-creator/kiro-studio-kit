@@ -1,0 +1,55 @@
+{
+  "name": "kiro-studio-kit",
+  "version": "0.1.1",
+  "description": "A lightweight CLI tool for generating structured AI prompts with role-based workflow, token economy, and quality gates",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "bin": {
+    "kiro-studio-kit": "dist/cli.js"
+  },
+  "files": [
+    "dist/",
+    "templates/",
+    "examples/",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/",
+    "build": "tsc",
+    "studio:prompt": "tsx src/cli.ts prompt",
+    "studio:summary": "tsx src/cli.ts summary",
+    "test": "vitest --run"
+  },
+  "keywords": [
+    "kiro",
+    "prompt",
+    "ai",
+    "cli",
+    "template",
+    "token-economy",
+    "quality-gates"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^25.6.0",
+    "eslint": "^10.2.1",
+    "fast-check": "^3.23.2",
+    "tsx": "^4.19.4",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.59.1",
+    "vitest": "^3.2.1"
+  }
+}
