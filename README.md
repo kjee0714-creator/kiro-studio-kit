@@ -1,5 +1,6 @@
 # Kiro Studio Kit
 
+For developers using AI coding tools (ChatGPT, Claude, Cursor, Kiro).
 [![npm version](https://img.shields.io/npm/v/kiro-studio-kit)](https://www.npmjs.com/package/kiro-studio-kit)
 [![license](https://img.shields.io/npm/l/kiro-studio-kit)](./LICENSE)
 
