@@ -15,6 +15,11 @@ AI アシスタント向けの軽量なプロンプト生成 CLI ツール。
 
 `task.md` を入力するだけで、役割分担・品質ゲート・暴走防止・トークン節約ルールを含む構造化プロンプトと、公開用ログテンプレートを自動生成します。
 
+## Why?
+
+Most AI tools generate code.
+Kiro Studio Kit controls how AI develops.
+
 ## What is this?
 
 Kiro Studio Kit is not just a prompt generator.
