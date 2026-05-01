@@ -1,24 +1,46 @@
 #!/usr/bin/env node
+import { fileURLToPath } from "node:url";
+import path from "node:path";
 import { generatePrompt } from "./core/promptGenerator.js";
+import type { PromptMode } from "./core/promptGenerator.js";
 import { generateExperimentSummary, formatExperimentSummary } from "./core/experimentSummary.js";
+
+const VALID_MODES: PromptMode[] = ["full", "compact", "minimal"];
 
 function showUsage(): void {
   console.error(`Usage:
-  kiro-studio-kit prompt <task-file> [--out <output-dir>] [--compact]
+  kiro-studio-kit prompt <task-file> [--out <output-dir>] [--mode <full|compact|minimal>] [--compact]
   kiro-studio-kit summary
 
 Options:
-  --out <dir>   出力ディレクトリを指定する（デフォルト: outputs）
-  --compact     コンパクトモードでプロンプトを生成し、トークン消費量を削減する
+  --out <dir>                      出力ディレクトリを指定する（デフォルト: outputs）
+  --mode <full|compact|minimal>    プロンプト生成モードを指定する（デフォルト: full）
+  --compact                        コンパクトモードでプロンプトを生成する（後方互換、--mode compact と同等）
 
 Development:
-  npm run studio:prompt -- <task-file> [--out <output-dir>] [--compact]
+  npm run studio:prompt -- <task-file> [--out <output-dir>] [--mode <full|compact|minimal>] [--compact]
   npm run studio:summary`);
 }
 
 /** CLI引数から --compact フラグを判定する */
 export function parseCompactFlag(args: string[]): boolean {
   return args.includes("--compact");
+}
+
+/** CLI引数から --mode <value> を抽出する */
+export function parseMode(args: string[]): { mode: PromptMode | null; invalid: string | null } {
+  const modeIndex = args.indexOf("--mode");
+  if (modeIndex === -1) {
+    return { mode: null, invalid: null };
+  }
+  const value = args[modeIndex + 1];
+  if (!value || value.startsWith("--")) {
+    return { mode: null, invalid: "" };
+  }
+  if (VALID_MODES.includes(value as PromptMode)) {
+    return { mode: value as PromptMode, invalid: null };
+  }
+  return { mode: null, invalid: value };
 }
 
 /** CLI引数から --out <dir> を抽出する */
@@ -41,7 +63,9 @@ async function handlePrompt(args: string[]): Promise<void> {
       i === 0 || // subcommand "prompt"
       (arg !== "--compact" &&
         arg !== "--out" &&
-        !(i > 0 && args[i - 1] === "--out")),
+        !(i > 0 && args[i - 1] === "--out") &&
+        arg !== "--mode" &&
+        !(i > 0 && args[i - 1] === "--mode")),
   );
   const taskFilePath = positionalArgs[1];
 
@@ -52,8 +76,18 @@ async function handlePrompt(args: string[]): Promise<void> {
 
   const outputDir = parseOutputDir(args);
   const compact = parseCompactFlag(args);
+  const { mode, invalid } = parseMode(args);
 
-  const result = await generatePrompt(taskFilePath, outputDir, { compact });
+  if (invalid !== null) {
+    console.error(`エラー: --mode に無効な値 "${invalid}" が指定されました。\n有効な値: full, compact, minimal`);
+    process.exit(1);
+  }
+
+  if (compact && mode !== null) {
+    console.error(`警告: --compact と --mode が同時に指定されました。--mode "${mode}" を優先します。`);
+  }
+
+  const result = await generatePrompt(taskFilePath, outputDir, { compact, mode: mode ?? undefined });
   console.log(`✅ プロンプト: ${result.promptPath}`);
   console.log(`✅ 公開ログテンプレ: ${result.publicLogPath}`);
   if (result.tokenLedgerPath) {
@@ -97,9 +131,13 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error: unknown) => {
-  console.error(
-    `予期しないエラーが発生しました: ${error instanceof Error ? error.message : String(error)}`,
-  );
-  process.exit(1);
-});
+const __filename = fileURLToPath(import.meta.url);
+
+if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
+  main().catch((error: unknown) => {
+    console.error(
+      `予期しないエラーが発生しました: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    process.exit(1);
+  });
+}

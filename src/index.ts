@@ -1,6 +1,7 @@
 // kiro-studio-kit public API
-export { parseTaskFile, assemblePrompt, generatePrompt } from "./core/promptGenerator.js";
+export { parseTaskFile, assemblePrompt, assembleMinimalPrompt, generatePrompt, resolvePromptMode } from "./core/promptGenerator.js";
 export type {
+  PromptMode,
   ParsedTask,
   RoleTemplates,
   RuleTemplates,

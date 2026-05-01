@@ -68,6 +68,7 @@ describe("tokenLedger", () => {
         timestamp: "2026-04-29T00:00:00.000Z",
         taskFile: "./examples/task.md",
         mode: "economy",
+        promptMode: "full",
         files: {
           taskFileChars: 100,
           promptChars: 4000,
@@ -219,6 +220,79 @@ describe("tokenLedger", () => {
       // 既存フィールドが正常に記録されていることも確認
       expect(parsed.mode).toBe("economy");
       expect(parsed.estimatedTokens.total).toBe(1150);
+    });
+  });
+
+  describe("promptMode フィールドの記録", () => {
+    function createSampleRecordForMode(
+      overrides?: Partial<TokenLedgerRecord>,
+    ): TokenLedgerRecord {
+      return {
+        runId: "test-run-id-mode",
+        timestamp: "2026-04-29T00:00:00.000Z",
+        taskFile: "./examples/task.md",
+        mode: "economy",
+        promptMode: "full",
+        files: {
+          taskFileChars: 100,
+          promptChars: 4000,
+          publicLogTemplateChars: 500,
+        },
+        estimatedTokens: {
+          taskFile: 25,
+          prompt: 1000,
+          publicLogTemplate: 125,
+          total: 1150,
+        },
+        limits: {
+          contextFileLimit: 5,
+          changedFileLimit: 3,
+          retryLimit: 2,
+        },
+        economyFeatures: {
+          contextManifest: true,
+          tokenEconomyRules: true,
+          deltaReportOnly: true,
+          stopOnRepeatedFailure: true,
+        },
+        ...overrides,
+      };
+    }
+
+    it("full モード時に promptMode: 'full' が記録される", async () => {
+      const tempDir = await createTempDir();
+      vi.spyOn(process, "cwd").mockReturnValue(tempDir);
+
+      const record = createSampleRecordForMode({ promptMode: "full" });
+      const logPath = await appendTokenLedgerRecord(record);
+
+      const content = await readFile(logPath, "utf-8");
+      const parsed = JSON.parse(content.trim()) as TokenLedgerRecord;
+      expect(parsed.promptMode).toBe("full");
+    });
+
+    it("compact モード時に promptMode: 'compact' が記録される", async () => {
+      const tempDir = await createTempDir();
+      vi.spyOn(process, "cwd").mockReturnValue(tempDir);
+
+      const record = createSampleRecordForMode({ promptMode: "compact" });
+      const logPath = await appendTokenLedgerRecord(record);
+
+      const content = await readFile(logPath, "utf-8");
+      const parsed = JSON.parse(content.trim()) as TokenLedgerRecord;
+      expect(parsed.promptMode).toBe("compact");
+    });
+
+    it("minimal モード時に promptMode: 'minimal' が記録される", async () => {
+      const tempDir = await createTempDir();
+      vi.spyOn(process, "cwd").mockReturnValue(tempDir);
+
+      const record = createSampleRecordForMode({ promptMode: "minimal" });
+      const logPath = await appendTokenLedgerRecord(record);
+
+      const content = await readFile(logPath, "utf-8");
+      const parsed = JSON.parse(content.trim()) as TokenLedgerRecord;
+      expect(parsed.promptMode).toBe("minimal");
     });
   });
 });

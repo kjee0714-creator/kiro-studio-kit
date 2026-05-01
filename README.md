@@ -44,14 +44,25 @@ npx kiro-studio-kit prompt ./examples/task.md
 ### `prompt` コマンド
 
 ```
-kiro-studio-kit prompt <task-file> [--out <output-dir>] [--compact]
+kiro-studio-kit prompt <task-file> [--out <output-dir>] [--mode <full|compact|minimal>] [--compact]
 ```
+
+### プロンプト生成モード
+
+| Mode | 用途 | 説明 |
+|------|------|------|
+| `full` | 新機能・設計変更・重要タスク | 役割分担とルールをすべて含む |
+| `compact` | 通常作業 | fullから見出しや説明を削減 |
+| `minimal` | 小修正・継続作業 | 最小限の実行ルールと品質ゲートのみ |
+
+> **Note:** `--compact` フラグは後方互換のために残されています。`--mode compact` と同等の動作をします。`--mode` と `--compact` が同時に指定された場合は `--mode` が優先されます。
 
 | オプション | 説明 | デフォルト |
 |---|---|---|
 | `<task-file>` | 入力する task.md のパス（必須） | — |
 | `--out <dir>` | 出力ディレクトリ | `outputs/` |
-| `--compact` | コンパクトモードでプロンプトを生成（トークン削減） | 無効 |
+| `--mode <full\|compact\|minimal>` | プロンプト生成モードを指定する | `full` |
+| `--compact` | コンパクトモードでプロンプトを生成（後方互換、`--mode compact` と同等） | 無効 |
 
 **出力例（通常モード）:**
 ```
@@ -366,6 +377,8 @@ import {
   // プロンプト生成
   generatePrompt,
   assemblePrompt,
+  assembleMinimalPrompt,
+  resolvePromptMode,
   parseTaskFile,
 
   // テンプレート
@@ -402,9 +415,13 @@ import {
 ### 主要な型
 
 ```typescript
+// プロンプト生成モード
+type PromptMode = "full" | "compact" | "minimal";
+
 // generatePrompt の引数
 interface GenerateOptions {
-  compact?: boolean;
+  mode?: PromptMode;       // プロンプト生成モード（デフォルト: "full"）
+  compact?: boolean;       // 後方互換（--mode compact と同等）
 }
 
 // generatePrompt の戻り値
@@ -450,7 +467,7 @@ interface GateResult {
 ```bash
 npm run typecheck   # TypeScript 型チェック
 npm run lint        # ESLint
-npm run test        # Vitest（192テスト）
+npm run test        # Vitest（236テスト）
 npm run build       # TypeScript コンパイル
 ```
 

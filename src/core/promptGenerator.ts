@@ -24,9 +24,27 @@ export type { TokenLedgerRecord } from "./tokenLedger.js";
 // Public types
 // ---------------------------------------------------------------------------
 
+/** プロンプト生成モード */
+export type PromptMode = "full" | "compact" | "minimal";
+
 /** generatePrompt のオプション */
 export interface GenerateOptions {
+  mode?: PromptMode;
   compact?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Mode resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * GenerateOptions からプロンプトモードを解決する。
+ * 優先順位: options.mode > options.compact > デフォルト("full")
+ */
+export function resolvePromptMode(options: GenerateOptions): PromptMode {
+  if (options.mode) return options.mode;
+  if (options.compact) return "compact";
+  return "full";
 }
 
 /** コンパクトモード時のトークン削減情報 */
@@ -86,6 +104,7 @@ interface GenerationLogParams {
     publicLogPath: string;
   };
   tokenReduction?: TokenReduction;
+  promptMode: PromptMode;
 }
 
 /** writeGenerationLogs の戻り値 */
@@ -224,6 +243,53 @@ ${rules.completionCriteria}
 }
 
 // ---------------------------------------------------------------------------
+// Minimal prompt assembly (pure function)
+// ---------------------------------------------------------------------------
+
+/**
+ * minimal モード用のプロンプトを組み立てる。
+ * テンプレートファイルに依存せず、インラインで文字列を組み立てる。
+ */
+export function assembleMinimalPrompt(task: ParsedTask): string {
+  return `# Kiro Prompt (Minimal)
+
+## Goal
+${task.goal}
+
+## Scope
+${task.scope}
+
+## Non-goals
+${task.nonGoals}
+
+## Implementation Rules
+- 既存のコードパターンと規約に従う
+- 最小差分で実装する（不要な変更を加えない）
+- Scope 外の変更は行わない
+- 同一エラーを2回修正しても解決しない場合は停止する
+- 要件が曖昧な場合は停止して確認する
+
+## Quality Gates
+
+\`\`\`bash
+npm run typecheck
+npm run lint
+npm run test
+npm run build
+\`\`\`
+
+- 存在しない script はスキップし、スキップ理由を報告する
+- 失敗時は原因・修正・再実行結果を記録する
+
+## Required Final Report
+- 変更ファイル一覧
+- 変更サマリー
+- 品質ゲート結果
+- 残課題
+`;
+}
+
+// ---------------------------------------------------------------------------
 // Generation pipeline: step functions
 // ---------------------------------------------------------------------------
 
@@ -293,6 +359,7 @@ async function writeGenerationLogs(
     timestamp: params.timestamp,
     taskFile: params.taskFilePath,
     mode: "economy",
+    promptMode: params.promptMode,
     files: { taskFileChars, promptChars, publicLogTemplateChars },
     estimatedTokens: {
       taskFile: estimateTokensFromChars(params.taskContent),
@@ -315,7 +382,15 @@ async function writeGenerationLogs(
             reductionPercent: params.tokenReduction.reductionPercent,
           },
         }
-      : {}),
+      : params.promptMode === "minimal"
+        ? {
+            compactMode: {
+              enabled: true,
+              tokensSaved: 0,
+              reductionPercent: 0,
+            },
+          }
+        : {}),
   };
   const tokenLedgerPath = await appendTokenLedgerRecord(tokenLedgerRecord);
 
@@ -324,6 +399,7 @@ async function writeGenerationLogs(
     timestamp: params.timestamp,
     taskFile: params.taskFilePath,
     mode: "studio",
+    promptMode: params.promptMode,
     promptPath: params.outputPaths.promptPath,
     publicLogPath: params.outputPaths.publicLogPath,
     tokenLedgerPath,
@@ -396,25 +472,43 @@ export async function generatePrompt(
   options?: GenerateOptions,
 ): Promise<GenerateResult> {
   const resolvedOutputDir = path.resolve(outputDir ?? DEFAULT_OUTPUT_DIR);
-  const inputs = await loadGenerationInputs(taskFilePath, options);
-  const contents = buildGenerationContents(inputs);
+  const resolvedMode = resolvePromptMode(options ?? {});
 
-  // コンパクトモード時: compactTransform → trimSection の順で圧縮し、トークン削減量を計算
-  let finalPromptContent = contents.promptContent;
+  let finalPromptContent: string;
   let tokenReduction: TokenReduction | undefined;
+  let taskContent: string;
+  let parsedTask: ParsedTask;
+  let publicLogTemplate: string;
 
-  if (options?.compact) {
-    const beforeTokens = estimateTokensFromChars(finalPromptContent);
-    finalPromptContent = compactTransform(finalPromptContent);
-    finalPromptContent = trimSection(finalPromptContent);
-    const afterTokens = estimateTokensFromChars(finalPromptContent);
-    const saved = beforeTokens - afterTokens;
-    tokenReduction = {
-      before: beforeTokens,
-      after: afterTokens,
-      saved,
-      reductionPercent: beforeTokens > 0 ? (saved / beforeTokens) * 100 : 0,
-    };
+  if (resolvedMode === "minimal") {
+    // minimal モード: テンプレート不要、直接プロンプトを組み立てる
+    taskContent = await readTextFile(taskFilePath);
+    parsedTask = parseTaskFile(taskContent);
+    publicLogTemplate = await loadPublicLogTemplate();
+    finalPromptContent = assembleMinimalPrompt(parsedTask);
+  } else {
+    // full / compact モード: テンプレートを読み込んでプロンプトを組み立てる
+    const inputs = await loadGenerationInputs(taskFilePath, { compact: resolvedMode === "compact" });
+    const contents = buildGenerationContents(inputs);
+    taskContent = inputs.taskContent;
+    parsedTask = inputs.parsedTask;
+    publicLogTemplate = contents.publicLogTemplate;
+    finalPromptContent = contents.promptContent;
+
+    if (resolvedMode === "compact") {
+      // コンパクトモード: compactTransform → trimSection の順で圧縮し、トークン削減量を計算
+      const beforeTokens = estimateTokensFromChars(finalPromptContent);
+      finalPromptContent = compactTransform(finalPromptContent);
+      finalPromptContent = trimSection(finalPromptContent);
+      const afterTokens = estimateTokensFromChars(finalPromptContent);
+      const saved = beforeTokens - afterTokens;
+      tokenReduction = {
+        before: beforeTokens,
+        after: afterTokens,
+        saved,
+        reductionPercent: beforeTokens > 0 ? (saved / beforeTokens) * 100 : 0,
+      };
+    }
   }
 
   const promptPath = await writePromptFile(resolvedOutputDir, finalPromptContent);
@@ -425,24 +519,25 @@ export async function generatePrompt(
   const logPaths = await writeGenerationLogs({
     runId,
     timestamp,
-    taskFilePath: inputs.taskFilePath,
-    taskContent: inputs.taskContent,
+    taskFilePath,
+    taskContent,
     promptContent: finalPromptContent,
-    publicLogTemplate: contents.publicLogTemplate,
+    publicLogTemplate,
     outputPaths: { promptPath, publicLogPath: "" },
     tokenReduction,
+    promptMode: resolvedMode,
   });
 
   const publicLogPath = await writePublicLogFile(
     resolvedOutputDir,
-    contents.publicLogTemplate,
+    publicLogTemplate,
     {
       runId,
       timestamp,
-      taskFile: inputs.taskFilePath,
-      goal: inputs.parsedTask.goal,
-      scope: inputs.parsedTask.scope,
-      nonGoals: inputs.parsedTask.nonGoals,
+      taskFile: taskFilePath,
+      goal: parsedTask.goal,
+      scope: parsedTask.scope,
+      nonGoals: parsedTask.nonGoals,
       promptPath,
       tokenLedgerPath: logPaths.tokenLedgerPath,
       experimentLogPath: logPaths.experimentLogPath,

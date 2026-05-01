@@ -1,5 +1,6 @@
 import path from "path";
 import { appendJsonlRecord } from "./jsonlLogger.js";
+import type { PromptMode } from "./promptGenerator.js";
 
 /** 実験ログの1レコード */
 export interface ExperimentRecord {
@@ -7,6 +8,7 @@ export interface ExperimentRecord {
   timestamp: string;
   taskFile: string;
   mode: "studio";
+  promptMode: PromptMode;
   promptPath: string;
   publicLogPath: string;
   tokenLedgerPath: string;

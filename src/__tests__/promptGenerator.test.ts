@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
-import { parseTaskFile, assemblePrompt, escapeRegExp } from "../core/promptGenerator.js";
+import { parseTaskFile, assemblePrompt, assembleMinimalPrompt, resolvePromptMode, escapeRegExp } from "../core/promptGenerator.js";
 import type {
   ParsedTask,
   RoleTemplates,
@@ -730,5 +730,153 @@ describe("compact mode pipeline", () => {
     expect(reduction.after).toBe(800);
     expect(reduction.saved).toBe(200);
     expect(reduction.reductionPercent).toBe(20);
+  });
+});
+
+describe("resolvePromptMode", () => {
+  it("mode が指定された場合はその値を返す", () => {
+    expect(resolvePromptMode({ mode: "full" })).toBe("full");
+    expect(resolvePromptMode({ mode: "compact" })).toBe("compact");
+    expect(resolvePromptMode({ mode: "minimal" })).toBe("minimal");
+  });
+  it("mode が未指定で compact: true の場合は 'compact' を返す", () => {
+    expect(resolvePromptMode({ compact: true })).toBe("compact");
+  });
+  it("mode も compact も未指定の場合は 'full' を返す", () => {
+    expect(resolvePromptMode({})).toBe("full");
+  });
+  it("mode と compact が両方指定された場合は mode を優先する", () => {
+    expect(resolvePromptMode({ mode: "minimal", compact: true })).toBe("minimal");
+    expect(resolvePromptMode({ mode: "full", compact: true })).toBe("full");
+  });
+});
+
+describe("resolvePromptMode property tests", () => {
+  it("Feature: prompt-mode-support, Property 2: resolvePromptMode の優先順位不変条件", () => {
+    const modeArb = fc.constantFrom("full" as const, "compact" as const, "minimal" as const);
+    fc.assert(fc.property(
+      fc.record({
+        mode: fc.option(modeArb, { nil: undefined }),
+        compact: fc.option(fc.boolean(), { nil: undefined }),
+      }),
+      (options) => {
+        const result = resolvePromptMode(options);
+        if (options.mode) {
+          expect(result).toBe(options.mode);
+        } else if (options.compact) {
+          expect(result).toBe("compact");
+        } else {
+          expect(result).toBe("full");
+        }
+      }
+    ), { numRuns: 100 });
+  });
+});
+
+describe("assembleMinimalPrompt", () => {
+  const sampleTask = {
+    goal: "テスト用のゴール",
+    scope: "テスト用のスコープ",
+    nonGoals: "テスト用のNon-goals",
+  };
+
+  it("Goal / Scope / Non-goals が展開される", () => {
+    const output = assembleMinimalPrompt(sampleTask);
+    expect(output).toContain("テスト用のゴール");
+    expect(output).toContain("テスト用のスコープ");
+    expect(output).toContain("テスト用のNon-goals");
+  });
+
+  it("品質ゲートコマンドが含まれる", () => {
+    const output = assembleMinimalPrompt(sampleTask);
+    expect(output).toContain("npm run typecheck");
+    expect(output).toContain("npm run lint");
+    expect(output).toContain("npm run test");
+    expect(output).toContain("npm run build");
+  });
+
+  it("スキップ理由報告の文言が含まれる", () => {
+    const output = assembleMinimalPrompt(sampleTask);
+    expect(output).toContain("スキップ");
+  });
+
+  it("最終報告フォーマットが含まれる", () => {
+    const output = assembleMinimalPrompt(sampleTask);
+    expect(output).toContain("変更ファイル");
+    expect(output).toContain("変更サマリー");
+    expect(output).toContain("品質ゲート結果");
+    expect(output).toContain("残課題");
+  });
+
+  it("Role Sequence セクションが含まれない", () => {
+    const output = assembleMinimalPrompt(sampleTask);
+    expect(output).not.toContain("### 1. Director");
+    expect(output).not.toContain("### 2. Architect");
+    expect(output).not.toContain("### 3. Implementer");
+    expect(output).not.toContain("### 4. QA");
+  });
+
+  it("# Kiro Prompt (Minimal) ヘッダーが含まれる", () => {
+    const output = assembleMinimalPrompt(sampleTask);
+    expect(output).toContain("# Kiro Prompt (Minimal)");
+  });
+});
+
+describe("assembleMinimalPrompt property tests", () => {
+  const safeStringArb = fc.string({ minLength: 1, maxLength: 200 }).filter(s => s.trim().length > 0);
+
+  it("Feature: prompt-mode-support, Property 3: minimal モードは Goal・Scope・Non-goals を常に含む", () => {
+    fc.assert(fc.property(
+      fc.record({ goal: safeStringArb, scope: safeStringArb, nonGoals: safeStringArb }),
+      (task) => {
+        const output = assembleMinimalPrompt(task);
+        expect(output).toContain(task.goal);
+        expect(output).toContain(task.scope);
+        expect(output).toContain(task.nonGoals);
+      }
+    ), { numRuns: 100 });
+  });
+
+  it("Feature: prompt-mode-support, Property 4: minimal モードは Role Sequence セクションを含まない", () => {
+    fc.assert(fc.property(
+      fc.record({ goal: safeStringArb, scope: safeStringArb, nonGoals: safeStringArb }),
+      (task) => {
+        const output = assembleMinimalPrompt(task);
+        expect(output).not.toContain("### 1. Director");
+        expect(output).not.toContain("### 2. Architect");
+        expect(output).not.toContain("### 3. Implementer");
+        expect(output).not.toContain("### 4. QA");
+      }
+    ), { numRuns: 100 });
+  });
+
+  it("Feature: prompt-mode-support, Property 5: minimal モードのトークン数は full モードより少ない", () => {
+    // RoleTemplates と RuleTemplates のアービトラリ
+    const templateArb = fc.string({ minLength: 50, maxLength: 500 });
+    const roleTemplatesArb = fc.record({
+      director: templateArb,
+      architect: templateArb,
+      implementer: templateArb,
+      qa: templateArb,
+    });
+    const ruleTemplatesArb = fc.record({
+      tokenEconomy: templateArb,
+      antiRunaway: templateArb,
+      qualityGates: templateArb,
+      completionCriteria: templateArb,
+    });
+
+    fc.assert(fc.property(
+      fc.record({ goal: safeStringArb, scope: safeStringArb, nonGoals: safeStringArb }),
+      roleTemplatesArb,
+      ruleTemplatesArb,
+      (task, roles, rules) => {
+        const fullOutput = assemblePrompt(task, roles, rules);
+        const minimalOutput = assembleMinimalPrompt(task);
+        const fullTokens = estimateTokensFromChars(fullOutput);
+        const minimalTokens = estimateTokensFromChars(minimalOutput);
+        expect(minimalTokens).toBeLessThan(fullTokens);
+      }
+    ), { numRuns: 100 });
   });
 });

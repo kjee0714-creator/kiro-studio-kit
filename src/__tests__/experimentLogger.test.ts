@@ -31,6 +31,7 @@ describe("experimentLogger", () => {
       timestamp: "2026-04-29T00:00:00.000Z",
       taskFile: "./examples/task.md",
       mode: "studio",
+      promptMode: "full",
       promptPath: "outputs/kiro-prompt.md",
       publicLogPath: "outputs/public-log-template.md",
       tokenLedgerPath: ".studio/token-ledger.jsonl",
