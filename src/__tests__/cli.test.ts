@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import fc from "fast-check";
-import { parseCompactFlag, parseMode } from "../cli.js";
+import { parseCompactFlag, parseMode, parseVersionFlag, parseHelpFlag } from "../cli.js";
 
 describe("parseCompactFlag", () => {
   it("--compact フラグが含まれる場合に true を返す", () => {
@@ -96,5 +96,37 @@ describe("--compact と --mode auto の同時指定", () => {
     } finally {
       errorSpy.mockRestore();
     }
+  });
+});
+
+describe("parseVersionFlag", () => {
+  it("--version で true を返す", () => {
+    expect(parseVersionFlag(["--version"])).toBe(true);
+  });
+
+  it("-v で true を返す", () => {
+    expect(parseVersionFlag(["-v"])).toBe(true);
+  });
+
+  it("未指定で false を返す", () => {
+    expect(parseVersionFlag(["prompt", "task.md"])).toBe(false);
+  });
+
+  it("他のフラグと混在しても検出する", () => {
+    expect(parseVersionFlag(["prompt", "--version", "task.md"])).toBe(true);
+  });
+});
+
+describe("parseHelpFlag", () => {
+  it("--help で true を返す", () => {
+    expect(parseHelpFlag(["--help"])).toBe(true);
+  });
+
+  it("-h で true を返す", () => {
+    expect(parseHelpFlag(["-h"])).toBe(true);
+  });
+
+  it("未指定で false を返す", () => {
+    expect(parseHelpFlag(["prompt", "task.md"])).toBe(false);
   });
 });

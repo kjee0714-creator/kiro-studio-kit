@@ -49,6 +49,68 @@ npx kiro-studio-kit@latest prompt ./task.md --mode auto
 
 ---
 
+## Try it in 1 minute
+
+Create a minimal task file:
+
+```bash
+cat > task.md <<'EOF'
+# Task
+
+## Goal
+Fix a small README typo
+
+## Scope
+Documentation only
+
+## Non-goals
+No code changes
+EOF
+```
+
+Generate a prompt with auto mode:
+
+```bash
+npx kiro-studio-kit@latest prompt ./task.md --mode auto
+```
+
+You should see output like:
+
+```
+🤖 auto mode: minimal selected
+✅ Prompt: outputs/kiro-prompt.md
+✅ Public log template: outputs/public-log-template.md
+✅ Token ledger: .studio/token-ledger.jsonl
+✅ Experiment log: .studio/experiments.jsonl
+```
+
+Then open the generated prompt:
+
+```bash
+cat outputs/kiro-prompt.md
+```
+
+**Windows PowerShell:**
+
+```powershell
+@"
+# Task
+
+## Goal
+Fix a small README typo
+
+## Scope
+Documentation only
+
+## Non-goals
+No code changes
+"@ | Set-Content -Encoding UTF8 task.md
+
+npx kiro-studio-kit@latest prompt ./task.md --mode auto
+```
+
+---
+
 ## CLI リファレンス
 
 ### `prompt` コマンド

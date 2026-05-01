@@ -1,9 +1,13 @@
 #!/usr/bin/env node
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { generatePrompt } from "./core/promptGenerator.js";
 import type { RequestedPromptMode } from "./core/promptGenerator.js";
 import { generateFullExperimentSummary, formatExperimentSummary } from "./core/experimentSummary.js";
+
+const require = createRequire(import.meta.url);
+const pkg = require("../package.json") as { version: string };
 
 const VALID_MODES: RequestedPromptMode[] = ["full", "compact", "minimal", "auto"];
 
@@ -13,13 +17,27 @@ function showUsage(): void {
   kiro-studio-kit summary
 
 Options:
-  --out <dir>                              出力ディレクトリを指定する（デフォルト: outputs）
-  --mode <full|compact|minimal|auto>       プロンプト生成モードを指定する（デフォルト: full）
-  --compact                                コンパクトモードでプロンプトを生成する（後方互換、--mode compact と同等）
+  --out <dir>                         Output directory (default: outputs)
+  --mode <full|compact|minimal|auto>  Prompt generation mode (default: full)
+  --compact                           Backward-compatible alias for --mode compact
+
+Other:
+  --help, -h                          Show help
+  --version, -v                       Show version
 
 Development:
   npm run studio:prompt -- <task-file> [--out <output-dir>] [--mode <full|compact|minimal|auto>] [--compact]
   npm run studio:summary`);
+}
+
+/** CLI引数から --version / -v フラグを判定する */
+export function parseVersionFlag(args: string[]): boolean {
+  return args.includes("--version") || args.includes("-v");
+}
+
+/** CLI引数から --help / -h フラグを判定する */
+export function parseHelpFlag(args: string[]): boolean {
+  return args.includes("--help") || args.includes("-h");
 }
 
 /** CLI引数から --compact フラグを判定する */
@@ -115,6 +133,19 @@ async function handleSummary(): Promise<void> {
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
+
+  // --version / -v takes priority
+  if (parseVersionFlag(args)) {
+    console.log(`kiro-studio-kit v${pkg.version}`);
+    return;
+  }
+
+  // --help / -h
+  if (parseHelpFlag(args)) {
+    showUsage();
+    return;
+  }
+
   const subcommand = args[0];
 
   if (!subcommand) {
