@@ -1,5 +1,9 @@
 import path from "path";
+import { fileURLToPath } from "url";
 import { readTextFile } from "./fileUtils.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 /** ロールテンプレートの集合 */
 export interface RoleTemplates {
@@ -9,9 +13,9 @@ export interface RoleTemplates {
   qa: string;
 }
 
-/** テンプレートディレクトリのベースパスを解決する */
+/** テンプレートディレクトリのベースパスを解決する（パッケージルート基準） */
 export function getTemplatesDir(): string {
-  return path.join(process.cwd(), "templates");
+  return path.resolve(__dirname, "../../templates");
 }
 
 /** 4つのロールテンプレートを並列に読み込む */
