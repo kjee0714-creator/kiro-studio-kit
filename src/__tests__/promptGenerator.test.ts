@@ -5,7 +5,12 @@ import type {
   ParsedTask,
   RoleTemplates,
   RuleTemplates,
+  GenerateOptions,
+  TokenReduction,
 } from "../core/promptGenerator.js";
+import { compactTransform } from "../core/compactTransformer.js";
+import { trimSection } from "../core/sectionTrimmer.js";
+import { estimateTokensFromChars } from "../core/tokenLedger.js";
 
 describe("parseTaskFile", () => {
   const DEFAULT_SCOPE =
@@ -620,5 +625,110 @@ describe("escapeRegExp", () => {
 
   it("空文字列はそのまま返す", () => {
     expect(escapeRegExp("")).toBe("");
+  });
+});
+
+describe("compact mode pipeline", () => {
+  const sampleTask: ParsedTask = {
+    goal: "テストゴール",
+    scope: "テストスコープ",
+    nonGoals: "テスト非目標",
+  };
+
+  const sampleRoles: RoleTemplates = {
+    director: "## Director Details\nディレクター内容\n\n\n\nExtra spacing",
+    architect: "## Architect Details\nアーキテクト内容",
+    implementer: "## Implementer Details\n実装者内容",
+    qa: "## QA Details\nQA内容",
+  };
+
+  const sampleRules: RuleTemplates = {
+    tokenEconomy: "トークンエコノミー内容",
+    antiRunaway: "アンチランナウェイ内容",
+    qualityGates: "## Quality Gate Details\n品質ゲート内容",
+    completionCriteria: "完了基準内容",
+  };
+
+  it("compact: true 時にプロンプトが圧縮される（見出し行が除去される）", () => {
+    const original = assemblePrompt(sampleTask, sampleRoles, sampleRules);
+    const compacted = trimSection(compactTransform(original));
+
+    // 元のプロンプトには見出し行がある
+    expect(original).toContain("## Goal");
+    expect(original).toContain("### 1. Director");
+
+    // コンパクト後は見出し行が除去されている
+    const compactedLines = compacted.split("\n");
+    const headingLines = compactedLines.filter((line) => line.match(/^#+\s/));
+    expect(headingLines).toHaveLength(0);
+  });
+
+  it("compact: true 時に連続空行が圧縮される", () => {
+    const original = assemblePrompt(sampleTask, sampleRoles, sampleRules);
+    const compacted = trimSection(compactTransform(original));
+
+    // 3行以上の連続空行がないことを確認
+    expect(compacted).not.toMatch(/\n{3,}/);
+  });
+
+  it("TokenReduction の値が正しく計算される", () => {
+    const original = assemblePrompt(sampleTask, sampleRoles, sampleRules);
+    const beforeTokens = estimateTokensFromChars(original);
+
+    let compacted = compactTransform(original);
+    compacted = trimSection(compacted);
+    const afterTokens = estimateTokensFromChars(compacted);
+
+    const saved = beforeTokens - afterTokens;
+    const reduction: TokenReduction = {
+      before: beforeTokens,
+      after: afterTokens,
+      saved,
+      reductionPercent: beforeTokens > 0 ? (saved / beforeTokens) * 100 : 0,
+    };
+
+    expect(reduction.before).toBeGreaterThan(0);
+    expect(reduction.after).toBeGreaterThan(0);
+    expect(reduction.saved).toBeGreaterThanOrEqual(0);
+    expect(reduction.before).toBe(reduction.after + reduction.saved);
+    expect(reduction.reductionPercent).toBeGreaterThanOrEqual(0);
+    expect(reduction.reductionPercent).toBeLessThanOrEqual(100);
+  });
+
+  it("compact 省略時に従来通りの出力であること", () => {
+    const output = assemblePrompt(sampleTask, sampleRoles, sampleRules);
+
+    // 見出し行が保持されている
+    expect(output).toContain("## Goal");
+    expect(output).toContain("## Scope");
+    expect(output).toContain("### 1. Director");
+    expect(output).toContain("## Token Economy Rules");
+    expect(output).toContain("## Quality Gates");
+
+    // ロール・ルール内容が含まれている
+    expect(output).toContain("ディレクター内容");
+    expect(output).toContain("トークンエコノミー内容");
+    expect(output).toContain("品質ゲート内容");
+  });
+
+  it("GenerateOptions 型が正しく定義されている", () => {
+    const opts: GenerateOptions = { compact: true };
+    expect(opts.compact).toBe(true);
+
+    const defaultOpts: GenerateOptions = {};
+    expect(defaultOpts.compact).toBeUndefined();
+  });
+
+  it("TokenReduction 型が正しく定義されている", () => {
+    const reduction: TokenReduction = {
+      before: 1000,
+      after: 800,
+      saved: 200,
+      reductionPercent: 20,
+    };
+    expect(reduction.before).toBe(1000);
+    expect(reduction.after).toBe(800);
+    expect(reduction.saved).toBe(200);
+    expect(reduction.reductionPercent).toBe(20);
   });
 });

@@ -163,5 +163,62 @@ describe("tokenLedger", () => {
       const parsed = JSON.parse(content.trim()) as TokenLedgerRecord;
       expect(parsed.runId).toBe("unique-run-id-xyz");
     });
+
+    it("compactMode フィールドが正しくシリアライズされる", async () => {
+      const tempDir = await createTempDir();
+      vi.spyOn(process, "cwd").mockReturnValue(tempDir);
+
+      const record = createSampleRecord({
+        compactMode: {
+          enabled: true,
+          tokensSaved: 150,
+          reductionPercent: 12.5,
+        },
+      });
+      const logPath = await appendTokenLedgerRecord(record);
+
+      const content = await readFile(logPath, "utf-8");
+      const parsed = JSON.parse(content.trim()) as TokenLedgerRecord;
+      expect(parsed.compactMode).toBeDefined();
+      expect(parsed.compactMode?.enabled).toBe(true);
+      expect(parsed.compactMode?.tokensSaved).toBe(150);
+      expect(parsed.compactMode?.reductionPercent).toBe(12.5);
+    });
+
+    it("compactMode が無効（enabled=false）の場合に正しくシリアライズされる", async () => {
+      const tempDir = await createTempDir();
+      vi.spyOn(process, "cwd").mockReturnValue(tempDir);
+
+      const record = createSampleRecord({
+        compactMode: {
+          enabled: false,
+          tokensSaved: 0,
+          reductionPercent: 0,
+        },
+      });
+      const logPath = await appendTokenLedgerRecord(record);
+
+      const content = await readFile(logPath, "utf-8");
+      const parsed = JSON.parse(content.trim()) as TokenLedgerRecord;
+      expect(parsed.compactMode).toBeDefined();
+      expect(parsed.compactMode?.enabled).toBe(false);
+      expect(parsed.compactMode?.tokensSaved).toBe(0);
+      expect(parsed.compactMode?.reductionPercent).toBe(0);
+    });
+
+    it("compactMode フィールドが省略された場合にレコードが正常にシリアライズされる", async () => {
+      const tempDir = await createTempDir();
+      vi.spyOn(process, "cwd").mockReturnValue(tempDir);
+
+      const record = createSampleRecord();
+      const logPath = await appendTokenLedgerRecord(record);
+
+      const content = await readFile(logPath, "utf-8");
+      const parsed = JSON.parse(content.trim()) as TokenLedgerRecord;
+      expect(parsed.compactMode).toBeUndefined();
+      // 既存フィールドが正常に記録されていることも確認
+      expect(parsed.mode).toBe("economy");
+      expect(parsed.estimatedTokens.total).toBe(1150);
+    });
   });
 });

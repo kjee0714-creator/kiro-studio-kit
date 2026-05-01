@@ -4,10 +4,21 @@ import { generateExperimentSummary, formatExperimentSummary } from "./core/exper
 
 function showUsage(): void {
   console.error(`Usage:
-  npm run studio:prompt -- <task-file> [--out <output-dir>]
-  npm run studio:summary
-  tsx src/cli.ts prompt <task-file> [--out <output-dir>]
-  tsx src/cli.ts summary`);
+  kiro-studio-kit prompt <task-file> [--out <output-dir>] [--compact]
+  kiro-studio-kit summary
+
+Options:
+  --out <dir>   出力ディレクトリを指定する（デフォルト: outputs）
+  --compact     コンパクトモードでプロンプトを生成し、トークン消費量を削減する
+
+Development:
+  npm run studio:prompt -- <task-file> [--out <output-dir>] [--compact]
+  npm run studio:summary`);
+}
+
+/** CLI引数から --compact フラグを判定する */
+export function parseCompactFlag(args: string[]): boolean {
+  return args.includes("--compact");
 }
 
 /** CLI引数から --out <dir> を抽出する */
@@ -24,7 +35,15 @@ function parseOutputDir(args: string[]): string | undefined {
 }
 
 async function handlePrompt(args: string[]): Promise<void> {
-  const taskFilePath = args[1];
+  // Filter out known flags to find the task file path
+  const positionalArgs = args.filter(
+    (arg, i) =>
+      i === 0 || // subcommand "prompt"
+      (arg !== "--compact" &&
+        arg !== "--out" &&
+        !(i > 0 && args[i - 1] === "--out")),
+  );
+  const taskFilePath = positionalArgs[1];
 
   if (!taskFilePath || taskFilePath.startsWith("--")) {
     showUsage();
@@ -32,8 +51,9 @@ async function handlePrompt(args: string[]): Promise<void> {
   }
 
   const outputDir = parseOutputDir(args);
+  const compact = parseCompactFlag(args);
 
-  const result = await generatePrompt(taskFilePath, outputDir);
+  const result = await generatePrompt(taskFilePath, outputDir, { compact });
   console.log(`✅ プロンプト: ${result.promptPath}`);
   console.log(`✅ 公開ログテンプレ: ${result.publicLogPath}`);
   if (result.tokenLedgerPath) {
@@ -41,6 +61,12 @@ async function handlePrompt(args: string[]): Promise<void> {
   }
   if (result.experimentLogPath) {
     console.log(`✅ 実験ログ: ${result.experimentLogPath}`);
+  }
+  if (result.tokenReduction) {
+    const { before, after, reductionPercent } = result.tokenReduction;
+    console.log(
+      `📊 トークン削減: ${before} → ${after} (${reductionPercent.toFixed(1)}% 削減)`,
+    );
   }
 }
 

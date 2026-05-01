@@ -13,6 +13,8 @@ import { appendTokenLedgerRecord, estimateTokensFromChars } from "./tokenLedger.
 import type { TokenLedgerRecord } from "./tokenLedger.js";
 import { expandTemplate } from "./templateExpander.js";
 import type { TemplateVariables } from "./templateExpander.js";
+import { compactTransform } from "./compactTransformer.js";
+import { trimSection } from "./sectionTrimmer.js";
 
 export type { RoleTemplates, RuleTemplates } from "./templateLoader.js";
 export type { ExperimentRecord } from "./experimentLogger.js";
@@ -22,12 +24,26 @@ export type { TokenLedgerRecord } from "./tokenLedger.js";
 // Public types
 // ---------------------------------------------------------------------------
 
+/** generatePrompt のオプション */
+export interface GenerateOptions {
+  compact?: boolean;
+}
+
+/** コンパクトモード時のトークン削減情報 */
+export interface TokenReduction {
+  before: number;
+  after: number;
+  saved: number;
+  reductionPercent: number;
+}
+
 /** generatePrompt の戻り値 */
 export interface GenerateResult {
   promptPath: string;
   publicLogPath: string;
   experimentLogPath?: string;
   tokenLedgerPath?: string;
+  tokenReduction?: TokenReduction;
 }
 
 /** task.md から抽出されたセクション */
@@ -57,12 +73,6 @@ interface GenerationContents {
   publicLogTemplate: string;
 }
 
-/** writeGenerationOutputs の戻り値 */
-interface GenerationOutputPaths {
-  promptPath: string;
-  publicLogPath: string;
-}
-
 /** writeGenerationLogs のパラメータ */
 interface GenerationLogParams {
   runId: string;
@@ -71,7 +81,11 @@ interface GenerationLogParams {
   taskContent: string;
   promptContent: string;
   publicLogTemplate: string;
-  outputPaths: GenerationOutputPaths;
+  outputPaths: {
+    promptPath: string;
+    publicLogPath: string;
+  };
+  tokenReduction?: TokenReduction;
 }
 
 /** writeGenerationLogs の戻り値 */
@@ -218,11 +232,12 @@ ${rules.completionCriteria}
  */
 async function loadGenerationInputs(
   taskFilePath: string,
+  options?: GenerateOptions,
 ): Promise<GenerationInputs> {
   const taskContent = await readTextFile(taskFilePath);
   const parsedTask = parseTaskFile(taskContent);
   const roles = await loadRoleTemplates();
-  const rules = await loadRuleTemplates();
+  const rules = await loadRuleTemplates({ compact: options?.compact });
   const publicLogTemplate = await loadPublicLogTemplate();
   return { taskFilePath, taskContent, parsedTask, roles, rules, publicLogTemplate };
 }
@@ -292,6 +307,15 @@ async function writeGenerationLogs(
       deltaReportOnly: true,
       stopOnRepeatedFailure: true,
     },
+    ...(params.tokenReduction
+      ? {
+          compactMode: {
+            enabled: true,
+            tokensSaved: params.tokenReduction.saved,
+            reductionPercent: params.tokenReduction.reductionPercent,
+          },
+        }
+      : {}),
   };
   const tokenLedgerPath = await appendTokenLedgerRecord(tokenLedgerRecord);
 
@@ -364,16 +388,36 @@ const DEFAULT_OUTPUT_DIR = "outputs";
  *
  * @param taskFilePath - task.md のパス
  * @param outputDir - 出力ディレクトリ（省略時は "outputs"）
+ * @param options - 生成オプション（省略時は通常モード）
  */
 export async function generatePrompt(
   taskFilePath: string,
   outputDir?: string,
+  options?: GenerateOptions,
 ): Promise<GenerateResult> {
   const resolvedOutputDir = path.resolve(outputDir ?? DEFAULT_OUTPUT_DIR);
-  const inputs = await loadGenerationInputs(taskFilePath);
+  const inputs = await loadGenerationInputs(taskFilePath, options);
   const contents = buildGenerationContents(inputs);
 
-  const promptPath = await writePromptFile(resolvedOutputDir, contents.promptContent);
+  // コンパクトモード時: compactTransform → trimSection の順で圧縮し、トークン削減量を計算
+  let finalPromptContent = contents.promptContent;
+  let tokenReduction: TokenReduction | undefined;
+
+  if (options?.compact) {
+    const beforeTokens = estimateTokensFromChars(finalPromptContent);
+    finalPromptContent = compactTransform(finalPromptContent);
+    finalPromptContent = trimSection(finalPromptContent);
+    const afterTokens = estimateTokensFromChars(finalPromptContent);
+    const saved = beforeTokens - afterTokens;
+    tokenReduction = {
+      before: beforeTokens,
+      after: afterTokens,
+      saved,
+      reductionPercent: beforeTokens > 0 ? (saved / beforeTokens) * 100 : 0,
+    };
+  }
+
+  const promptPath = await writePromptFile(resolvedOutputDir, finalPromptContent);
 
   const runId = randomUUID();
   const timestamp = new Date().toISOString();
@@ -383,9 +427,10 @@ export async function generatePrompt(
     timestamp,
     taskFilePath: inputs.taskFilePath,
     taskContent: inputs.taskContent,
-    promptContent: contents.promptContent,
+    promptContent: finalPromptContent,
     publicLogTemplate: contents.publicLogTemplate,
     outputPaths: { promptPath, publicLogPath: "" },
+    tokenReduction,
   });
 
   const publicLogPath = await writePublicLogFile(
@@ -409,5 +454,6 @@ export async function generatePrompt(
     publicLogPath,
     experimentLogPath: logPaths.experimentLogPath,
     tokenLedgerPath: logPaths.tokenLedgerPath,
+    tokenReduction,
   };
 }

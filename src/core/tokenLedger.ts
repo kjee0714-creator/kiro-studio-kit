@@ -29,6 +29,11 @@ export interface TokenLedgerRecord {
     deltaReportOnly: boolean;
     stopOnRepeatedFailure: boolean;
   };
+  compactMode?: {
+    enabled: boolean;
+    tokensSaved: number;
+    reductionPercent: number;
+  };
 }
 
 /**

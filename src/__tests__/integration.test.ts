@@ -1,9 +1,11 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { mkdtemp, rm, readFile } from "fs/promises";
+import { mkdtemp, rm, readFile, stat, cp } from "fs/promises";
 import { tmpdir } from "os";
-import { join } from "path";
+import { join, resolve } from "path";
 import type { ExperimentRecord } from "../core/experimentLogger.js";
 import type { TokenLedgerRecord } from "../core/tokenLedger.js";
+import { generatePrompt } from "../core/promptGenerator.js";
+import type { GenerateResult } from "../core/promptGenerator.js";
 
 describe("Integration: Experiment Logger + Token Ledger", () => {
   // These tests verify the runId linkage by directly calling appendExperimentRecord
@@ -135,5 +137,135 @@ describe("Integration: Experiment Logger + Token Ledger", () => {
     expect(record.tokenLedgerPath).toContain("token-ledger.jsonl");
     expect(record.estimatedTokens).toBe(1150);
     expect(record.features.tokenLedger).toBe(true);
+  });
+});
+
+
+describe("Integration: Compact Mode", () => {
+  const tempDirs: string[] = [];
+  const taskFilePath = resolve("examples/task.md");
+  const templatesDir = resolve("templates");
+
+  async function createTempDir(): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), "compact-integration-"));
+    tempDirs.push(dir);
+    // Copy templates into temp dir so templateLoader can find them
+    await cp(templatesDir, join(dir, "templates"), { recursive: true });
+    return dir;
+  }
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    for (const dir of tempDirs) {
+      await rm(dir, { recursive: true, force: true });
+    }
+    tempDirs.length = 0;
+  });
+
+  it("compact: true で出力ファイルが生成される", async () => {
+    const tempDir = await createTempDir();
+    vi.spyOn(process, "cwd").mockReturnValue(tempDir);
+
+    const outputDir = join(tempDir, "outputs");
+    const result: GenerateResult = await generatePrompt(taskFilePath, outputDir, { compact: true });
+
+    // プロンプトファイルが存在する
+    const promptStat = await stat(result.promptPath);
+    expect(promptStat.isFile()).toBe(true);
+
+    // 公開ログファイルが存在する
+    const publicLogStat = await stat(result.publicLogPath);
+    expect(publicLogStat.isFile()).toBe(true);
+
+    // トークン台帳ファイルが存在する
+    expect(result.tokenLedgerPath).toBeDefined();
+    const ledgerPath = result.tokenLedgerPath ?? "";
+    const ledgerStat = await stat(ledgerPath);
+    expect(ledgerStat.isFile()).toBe(true);
+  });
+
+  it("compact: true で生成されたプロンプトに見出し行が含まれない", async () => {
+    const tempDir = await createTempDir();
+    vi.spyOn(process, "cwd").mockReturnValue(tempDir);
+
+    const outputDir = join(tempDir, "outputs");
+    const result = await generatePrompt(taskFilePath, outputDir, { compact: true });
+
+    const promptContent = await readFile(result.promptPath, "utf-8");
+    const lines = promptContent.split("\n");
+    const headingLines = lines.filter((line) => /^#+\s/.test(line));
+
+    expect(headingLines).toHaveLength(0);
+  });
+
+  it("compact: true で TokenReduction が正しく返される", async () => {
+    const tempDir = await createTempDir();
+    vi.spyOn(process, "cwd").mockReturnValue(tempDir);
+
+    const outputDir = join(tempDir, "outputs");
+    const result = await generatePrompt(taskFilePath, outputDir, { compact: true });
+
+    expect(result.tokenReduction).toBeDefined();
+    const reduction = result.tokenReduction ?? { before: 0, after: 0, saved: 0, reductionPercent: 0 };
+
+    expect(reduction.before).toBeGreaterThan(0);
+    expect(reduction.after).toBeGreaterThan(0);
+    expect(reduction.saved).toBeGreaterThanOrEqual(0);
+    expect(reduction.before).toBe(reduction.after + reduction.saved);
+    expect(reduction.reductionPercent).toBeGreaterThanOrEqual(0);
+    expect(reduction.reductionPercent).toBeLessThanOrEqual(100);
+  });
+
+  it("compact: true で Token Ledger に compactMode 情報が記録される", async () => {
+    const tempDir = await createTempDir();
+    vi.spyOn(process, "cwd").mockReturnValue(tempDir);
+
+    const outputDir = join(tempDir, "outputs");
+    const result = await generatePrompt(taskFilePath, outputDir, { compact: true });
+
+    const ledgerContent = await readFile(result.tokenLedgerPath ?? "", "utf-8");
+    const lastLine = ledgerContent.trim().split("\n").pop() ?? "";
+    const ledgerRecord = JSON.parse(lastLine) as TokenLedgerRecord;
+
+    expect(ledgerRecord.compactMode).toBeDefined();
+    const compactMode = ledgerRecord.compactMode ?? { enabled: false, tokensSaved: 0, reductionPercent: 0 };
+    expect(compactMode.enabled).toBe(true);
+    expect(compactMode.tokensSaved).toBeGreaterThanOrEqual(0);
+    expect(compactMode.reductionPercent).toBeGreaterThanOrEqual(0);
+    expect(compactMode.reductionPercent).toBeLessThanOrEqual(100);
+
+    // TokenReduction と Token Ledger の値が一致する
+    const tokenReduction = result.tokenReduction ?? { saved: 0, reductionPercent: 0, before: 0, after: 0 };
+    expect(compactMode.tokensSaved).toBe(tokenReduction.saved);
+    expect(compactMode.reductionPercent).toBe(tokenReduction.reductionPercent);
+  });
+
+  it("compact 省略時に従来通りの動作である", async () => {
+    const tempDir = await createTempDir();
+    vi.spyOn(process, "cwd").mockReturnValue(tempDir);
+
+    const outputDir = join(tempDir, "outputs");
+    const result = await generatePrompt(taskFilePath, outputDir);
+
+    // 出力ファイルが生成される
+    const promptStat = await stat(result.promptPath);
+    expect(promptStat.isFile()).toBe(true);
+
+    // tokenReduction は undefined
+    expect(result.tokenReduction).toBeUndefined();
+
+    // プロンプトに見出し行が保持されている
+    const promptContent = await readFile(result.promptPath, "utf-8");
+    expect(promptContent).toContain("## Goal");
+    expect(promptContent).toContain("## Scope");
+    expect(promptContent).toContain("### 1. Director");
+    expect(promptContent).toContain("## Token Economy Rules");
+    expect(promptContent).toContain("## Quality Gates");
+
+    // Token Ledger に compactMode が記録されていない
+    const ledgerContent = await readFile(result.tokenLedgerPath ?? "", "utf-8");
+    const lastLine = ledgerContent.trim().split("\n").pop() ?? "";
+    const ledgerRecord = JSON.parse(lastLine) as TokenLedgerRecord;
+    expect(ledgerRecord.compactMode).toBeUndefined();
   });
 });
