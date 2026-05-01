@@ -2,23 +2,23 @@
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { generatePrompt } from "./core/promptGenerator.js";
-import type { PromptMode } from "./core/promptGenerator.js";
-import { generateExperimentSummary, formatExperimentSummary } from "./core/experimentSummary.js";
+import type { RequestedPromptMode } from "./core/promptGenerator.js";
+import { generateFullExperimentSummary, formatExperimentSummary } from "./core/experimentSummary.js";
 
-const VALID_MODES: PromptMode[] = ["full", "compact", "minimal"];
+const VALID_MODES: RequestedPromptMode[] = ["full", "compact", "minimal", "auto"];
 
 function showUsage(): void {
   console.error(`Usage:
-  kiro-studio-kit prompt <task-file> [--out <output-dir>] [--mode <full|compact|minimal>] [--compact]
+  kiro-studio-kit prompt <task-file> [--out <output-dir>] [--mode <full|compact|minimal|auto>] [--compact]
   kiro-studio-kit summary
 
 Options:
-  --out <dir>                      出力ディレクトリを指定する（デフォルト: outputs）
-  --mode <full|compact|minimal>    プロンプト生成モードを指定する（デフォルト: full）
-  --compact                        コンパクトモードでプロンプトを生成する（後方互換、--mode compact と同等）
+  --out <dir>                              出力ディレクトリを指定する（デフォルト: outputs）
+  --mode <full|compact|minimal|auto>       プロンプト生成モードを指定する（デフォルト: full）
+  --compact                                コンパクトモードでプロンプトを生成する（後方互換、--mode compact と同等）
 
 Development:
-  npm run studio:prompt -- <task-file> [--out <output-dir>] [--mode <full|compact|minimal>] [--compact]
+  npm run studio:prompt -- <task-file> [--out <output-dir>] [--mode <full|compact|minimal|auto>] [--compact]
   npm run studio:summary`);
 }
 
@@ -28,7 +28,7 @@ export function parseCompactFlag(args: string[]): boolean {
 }
 
 /** CLI引数から --mode <value> を抽出する */
-export function parseMode(args: string[]): { mode: PromptMode | null; invalid: string | null } {
+export function parseMode(args: string[]): { mode: RequestedPromptMode | null; invalid: string | null } {
   const modeIndex = args.indexOf("--mode");
   if (modeIndex === -1) {
     return { mode: null, invalid: null };
@@ -37,8 +37,8 @@ export function parseMode(args: string[]): { mode: PromptMode | null; invalid: s
   if (!value || value.startsWith("--")) {
     return { mode: null, invalid: "" };
   }
-  if (VALID_MODES.includes(value as PromptMode)) {
-    return { mode: value as PromptMode, invalid: null };
+  if (VALID_MODES.includes(value as RequestedPromptMode)) {
+    return { mode: value as RequestedPromptMode, invalid: null };
   }
   return { mode: null, invalid: value };
 }
@@ -79,7 +79,7 @@ async function handlePrompt(args: string[]): Promise<void> {
   const { mode, invalid } = parseMode(args);
 
   if (invalid !== null) {
-    console.error(`エラー: --mode に無効な値 "${invalid}" が指定されました。\n有効な値: full, compact, minimal`);
+    console.error(`エラー: --mode に無効な値 "${invalid}" が指定されました。\n有効な値: full, compact, minimal, auto`);
     process.exit(1);
   }
 
@@ -96,6 +96,10 @@ async function handlePrompt(args: string[]): Promise<void> {
   if (result.experimentLogPath) {
     console.log(`✅ 実験ログ: ${result.experimentLogPath}`);
   }
+  if (result.autoModeDecision) {
+    const { resolvedMode, reasons } = result.autoModeDecision;
+    console.log(`🤖 auto mode: ${resolvedMode} selected 理由: ${reasons.join(", ")}`);
+  }
   if (result.tokenReduction) {
     const { before, after, reductionPercent } = result.tokenReduction;
     console.log(
@@ -105,8 +109,8 @@ async function handlePrompt(args: string[]): Promise<void> {
 }
 
 async function handleSummary(): Promise<void> {
-  const summary = await generateExperimentSummary();
-  console.log(formatExperimentSummary(summary));
+  const { summary, autoSummary } = await generateFullExperimentSummary();
+  console.log(formatExperimentSummary(summary, autoSummary));
 }
 
 async function main(): Promise<void> {

@@ -880,3 +880,38 @@ describe("assembleMinimalPrompt property tests", () => {
     ), { numRuns: 100 });
   });
 });
+
+describe("auto mode support", () => {
+  /**
+   * **Validates: Requirements 7.1, 7.2, 7.3, 7.4, 7.5**
+   */
+  it("resolvePromptMode({ mode: 'auto' }) returns 'full'", () => {
+    expect(resolvePromptMode({ mode: "auto" })).toBe("full");
+  });
+
+  it("resolvePromptMode({ mode: 'auto', compact: true }) returns 'compact' (auto skips mode check, falls through to compact)", () => {
+    // When mode is "auto", resolvePromptMode skips it (since it's not a concrete PromptMode)
+    // and checks compact flag next, returning "compact"
+    expect(resolvePromptMode({ mode: "auto", compact: true })).toBe("compact");
+  });
+
+  it("既存モード full の動作が変わらないこと", () => {
+    expect(resolvePromptMode({ mode: "full" })).toBe("full");
+  });
+
+  it("既存モード compact の動作が変わらないこと", () => {
+    expect(resolvePromptMode({ mode: "compact" })).toBe("compact");
+  });
+
+  it("既存モード minimal の動作が変わらないこと", () => {
+    expect(resolvePromptMode({ mode: "minimal" })).toBe("minimal");
+  });
+
+  it("mode 未指定時のデフォルト full が変わらないこと", () => {
+    expect(resolvePromptMode({})).toBe("full");
+  });
+
+  it("compact フラグのみ指定時の動作が変わらないこと", () => {
+    expect(resolvePromptMode({ compact: true })).toBe("compact");
+  });
+});

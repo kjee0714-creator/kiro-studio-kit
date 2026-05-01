@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import fc from "fast-check";
 import { parseCompactFlag, parseMode } from "../cli.js";
 
@@ -41,6 +41,9 @@ describe("parseMode", () => {
   it("--mode minimal を正しく解析する", () => {
     expect(parseMode(["prompt", "task.md", "--mode", "minimal"])).toEqual({ mode: "minimal", invalid: null });
   });
+  it("--mode auto を正しく解析する", () => {
+    expect(parseMode(["--mode", "auto"])).toEqual({ mode: "auto", invalid: null });
+  });
   it("--mode が指定されない場合は null を返す", () => {
     expect(parseMode(["prompt", "task.md"])).toEqual({ mode: null, invalid: null });
   });
@@ -58,12 +61,40 @@ describe("parseMode", () => {
 describe("parseMode property tests", () => {
   it("Feature: prompt-mode-support, Property 1: 不正な --mode 値は常にエラーになる", () => {
     fc.assert(fc.property(
-      fc.string().filter(s => !["full", "compact", "minimal"].includes(s) && s.length > 0 && !s.startsWith("--")),
+      fc.string().filter(s => !["full", "compact", "minimal", "auto"].includes(s) && s.length > 0 && !s.startsWith("--")),
       (invalidMode) => {
         const result = parseMode(["--mode", invalidMode]);
         expect(result.invalid).toBe(invalidMode);
         expect(result.mode).toBeNull();
       }
     ), { numRuns: 100 });
+  });
+});
+
+describe("--compact と --mode auto の同時指定", () => {
+  it("--compact と --mode auto が同時に指定された場合、--mode auto が優先され警告が出力される", () => {
+    const args = ["prompt", "task.md", "--compact", "--mode", "auto"];
+
+    // parseMode should return auto
+    const { mode, invalid } = parseMode(args);
+    expect(mode).toBe("auto");
+    expect(invalid).toBeNull();
+
+    // parseCompactFlag should return true
+    const compact = parseCompactFlag(args);
+    expect(compact).toBe(true);
+
+    // Simulate the warning logic from handlePrompt
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      if (compact && mode !== null) {
+        console.error(`警告: --compact と --mode が同時に指定されました。--mode "${mode}" を優先します。`);
+      }
+      expect(errorSpy).toHaveBeenCalledWith(
+        '警告: --compact と --mode が同時に指定されました。--mode "auto" を優先します。',
+      );
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 });

@@ -1,6 +1,6 @@
 import path from "path";
 import { appendJsonlRecord } from "./jsonlLogger.js";
-import type { PromptMode } from "./promptGenerator.js";
+import type { PromptMode, RequestedPromptMode } from "./promptGenerator.js";
 
 /** トークン台帳の1レコード */
 export interface TokenLedgerRecord {
@@ -36,6 +36,7 @@ export interface TokenLedgerRecord {
     tokensSaved: number;
     reductionPercent: number;
   };
+  requestedPromptMode?: RequestedPromptMode;
 }
 
 /**

@@ -6,9 +6,11 @@
 For developers using AI coding tools (ChatGPT, Claude, Cursor, Kiro).
 
 > Turn task.md into a structured AI development prompt with roles, rules, and reproducible logs.
+>
+> **Control how AI develops, not just what it generates.**
 
 ```bash
-npx kiro-studio-kit prompt ./task.md
+npx kiro-studio-kit@latest prompt ./task.md --mode auto
 ```
 
 AI アシスタント向けの軽量なプロンプト生成 CLI ツール。
@@ -22,6 +24,8 @@ AI アシスタント向けの軽量なプロンプト生成 CLI ツール。
 Most AI tools generate code.
 Kiro Studio Kit controls **how** AI develops.
 
+Kiro Studio Kit is not just a prompt generator — it is a control layer for AI-driven development.
+
 ---
 
 ## Quick Start
@@ -34,7 +38,13 @@ npm run studio:prompt -- ./examples/task.md
 パッケージとしてインストールした場合:
 
 ```bash
-npx kiro-studio-kit prompt ./examples/task.md
+npx kiro-studio-kit@latest prompt ./examples/task.md
+```
+
+auto モードで実行:
+
+```bash
+npx kiro-studio-kit@latest prompt ./task.md --mode auto
 ```
 
 ---
@@ -44,7 +54,7 @@ npx kiro-studio-kit prompt ./examples/task.md
 ### `prompt` コマンド
 
 ```
-kiro-studio-kit prompt <task-file> [--out <output-dir>] [--mode <full|compact|minimal>] [--compact]
+kiro-studio-kit prompt <task-file> [--out <output-dir>] [--mode <full|compact|minimal|auto>] [--compact]
 ```
 
 ### プロンプト生成モード
@@ -54,14 +64,50 @@ kiro-studio-kit prompt <task-file> [--out <output-dir>] [--mode <full|compact|mi
 | `full` | 新機能・設計変更・重要タスク | 役割分担とルールをすべて含む |
 | `compact` | 通常作業 | fullから見出しや説明を削減 |
 | `minimal` | 小修正・継続作業 | 最小限の実行ルールと品質ゲートのみ |
+| `auto` | モード選択を自動化したい場合 | task.md をスコアリングし、説明可能なルールベースで最適なモードを選択 |
 
 > **Note:** `--compact` フラグは後方互換のために残されています。`--mode compact` と同等の動作をします。`--mode` と `--compact` が同時に指定された場合は `--mode` が優先されます。
+
+### auto モードのスコアリングルール
+
+`--mode auto` enables deterministic, rule-based prompt selection.
+It analyzes `task.md` (Goal and Scope sections) and selects the most appropriate mode:
+
+- **minimal** for small fixes (typo, README edits)
+- **compact** for normal work (no special keywords)
+- **full** for complex or risky changes (schema, auth, migration, refactor)
+
+The decision is explainable and logged for later analysis.
+
+`--mode auto` を指定すると、task.md の内容をキーワードスコアリングで分析し、最適なモードを決定論的に選択します。
+スコアリング対象は Goal と Scope のみです（Non-goals は除外）。
+
+#### キーワード定義
+
+| カテゴリ | キーワード | スコア |
+|---|---|---|
+| Full_Keyword | 設計, architecture, リファクタ, refactor, 新機能, feature, API, DB, schema, 認証, auth, migration, 破壊的変更, breaking, 複数ファイル, テスト追加, 品質ゲート, property, fast-check | +1（各キーワードごと） |
+| Minimal_Keyword | typo, 誤字, 文言修正, README, コメント修正, 小修正, 1ファイル, 継続, 微修正 | -1（各キーワードごと） |
+| Safety_Keyword | schema, auth, migration, breaking, refactor, リファクタ | スコアに関係なく full を強制 |
+
+#### 閾値ルール
+
+| 条件 | 選択されるモード |
+|---|---|
+| Safety_Keyword にマッチ | `full`（強制） |
+| score >= 4 | `full` |
+| 1 <= score < 4 | `compact` |
+| score <= 0 | `minimal` |
+| キーワードヒットなし | `compact`（デフォルト） |
+
+- 英語キーワードは `\b`（単語境界）でマッチし、大文字小文字を区別しません
+- 日本語キーワードは部分文字列マッチです
 
 | オプション | 説明 | デフォルト |
 |---|---|---|
 | `<task-file>` | 入力する task.md のパス（必須） | — |
 | `--out <dir>` | 出力ディレクトリ | `outputs/` |
-| `--mode <full\|compact\|minimal>` | プロンプト生成モードを指定する | `full` |
+| `--mode <full\|compact\|minimal\|auto>` | プロンプト生成モードを指定する | `full` |
 | `--compact` | コンパクトモードでプロンプトを生成（後方互換、`--mode compact` と同等） | 無効 |
 
 **出力例（通常モード）:**
@@ -81,6 +127,14 @@ kiro-studio-kit prompt <task-file> [--out <output-dir>] [--mode <full|compact|mi
 📊 トークン削減: 1968 → 1674 (14.9% 削減)
 ```
 
+**出力例（--mode auto）:**
+```
+$ kiro-studio-kit prompt task.md --mode auto
+🤖 auto mode: compact selected 理由: Full_Keyword: 設計 (+1), Full_Keyword: API (+1)
+✅ プロンプト: outputs/kiro-prompt.md
+✅ 公開ログテンプレ: outputs/public-log-template.md
+```
+
 ### `summary` コマンド
 
 ```
@@ -88,13 +142,27 @@ kiro-studio-kit summary
 ```
 
 `.studio/` 配下の実験ログとトークン台帳を集計し、統計サマリーを表示します。
+auto mode の使用状況（分布・平均スコア・よく出る理由）も表示されます。
 
 ```
 runs: 5
 avg tokens: 2050
 avg prompt size: 8200 chars
 economy usage: 100%
+
+auto usage:
+  total: 3
+  minimal: 1
+  compact: 1
+  full: 1
+  avg score: 1.3
+
+top reasons:
+  Full_Keyword: schema (+1): 2
+  Minimal_Keyword: README (-1): 1
 ```
+
+auto mode を使用していない場合は `auto usage: none` と表示されます。
 
 ---
 
@@ -340,6 +408,7 @@ kiro-studio-kit/
 │   ├── index.ts                        # パッケージ公開 API
 │   └── core/
 │       ├── promptGenerator.ts          # プロンプト組み立て・生成（メインパイプライン）
+│       ├── autoModeResolver.ts         # auto モードのキーワードスコアリングエンジン
 │       ├── templateLoader.ts           # テンプレート並列読み込み・stripExplanations
 │       ├── templateExpander.ts         # {{variable}} 展開
 │       ├── compactTransformer.ts       # コンパクト変換（見出し除去・空行圧縮・箇条書き正規化）
@@ -381,6 +450,9 @@ import {
   resolvePromptMode,
   parseTaskFile,
 
+  // auto モード
+  selectPromptModeFromTask,
+
   // テンプレート
   loadRoleTemplates,
   loadRuleTemplates,
@@ -396,12 +468,14 @@ import {
   formatGateResults,
   determineSkippableGates,
 
-  // ログ
+  // ログ・サマリー
   appendExperimentRecord,
   appendTokenLedgerRecord,
   appendJsonlRecord,
   readJsonlFile,
   generateExperimentSummary,
+  generateFullExperimentSummary,
+  generateAutoModeSummary,
   formatExperimentSummary,
   estimateTokensFromChars,
 
@@ -415,13 +489,16 @@ import {
 ### 主要な型
 
 ```typescript
-// プロンプト生成モード
+// プロンプト生成モード（内部で使用される実モード）
 type PromptMode = "full" | "compact" | "minimal";
+
+// ユーザーが CLI / API で指定するモード（"auto" を含む）
+type RequestedPromptMode = PromptMode | "auto";
 
 // generatePrompt の引数
 interface GenerateOptions {
-  mode?: PromptMode;       // プロンプト生成モード（デフォルト: "full"）
-  compact?: boolean;       // 後方互換（--mode compact と同等）
+  mode?: RequestedPromptMode; // プロンプト生成モード（デフォルト: "full"）
+  compact?: boolean;          // 後方互換（--mode compact と同等）
 }
 
 // generatePrompt の戻り値
@@ -430,7 +507,16 @@ interface GenerateResult {
   publicLogPath: string;
   experimentLogPath?: string;
   tokenLedgerPath?: string;
-  tokenReduction?: TokenReduction;  // --compact 時のみ
+  tokenReduction?: TokenReduction;      // --compact 時のみ
+  autoModeDecision?: AutoModeDecision;  // --mode auto 時のみ
+}
+
+// auto モード判定結果
+interface AutoModeDecision {
+  requestedMode: "auto";
+  resolvedMode: PromptMode;
+  score: number;
+  reasons: string[];
 }
 
 // トークン削減情報
@@ -458,6 +544,14 @@ interface GateResult {
   retryResult?: "pass" | "fail";
   skipReason?: string;
 }
+
+// auto モード集計結果
+interface AutoModeSummary {
+  totalAutoRuns: number;
+  resolvedCounts: { minimal: number; compact: number; full: number };
+  avgScore: number;
+  topReasons: Array<{ reason: string; count: number }>;
+}
 ```
 
 ---
@@ -467,7 +561,7 @@ interface GateResult {
 ```bash
 npm run typecheck   # TypeScript 型チェック
 npm run lint        # ESLint
-npm run test        # Vitest（236テスト）
+npm run test        # Vitest（282テスト）
 npm run build       # TypeScript コンパイル
 ```
 
@@ -476,6 +570,7 @@ npm run build       # TypeScript コンパイル
 - `compactTransform` の見出し除去・空行圧縮・箇条書き正規化
 - `stripExplanations` のコマンド保持
 - トークン削減量の非負性
+- `autoModeResolver` の resolvedMode 有効性・reasons 非空性・Safety キーワード強制・スコア閾値整合性・大文字小文字無視・nonGoals 除外
 
 ---
 

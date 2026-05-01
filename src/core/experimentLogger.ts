@@ -1,6 +1,6 @@
 import path from "path";
 import { appendJsonlRecord } from "./jsonlLogger.js";
-import type { PromptMode } from "./promptGenerator.js";
+import type { PromptMode, RequestedPromptMode } from "./promptGenerator.js";
 
 /** 実験ログの1レコード */
 export interface ExperimentRecord {
@@ -24,6 +24,11 @@ export interface ExperimentRecord {
     taskChars: number;
     promptChars: number;
     contextMode: "economy";
+  };
+  requestedPromptMode?: RequestedPromptMode;
+  autoModeDecision?: {
+    score: number;
+    reasons: string[];
   };
 }
 

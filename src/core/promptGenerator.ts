@@ -15,10 +15,13 @@ import { expandTemplate } from "./templateExpander.js";
 import type { TemplateVariables } from "./templateExpander.js";
 import { compactTransform } from "./compactTransformer.js";
 import { trimSection } from "./sectionTrimmer.js";
+import { selectPromptModeFromTask } from "./autoModeResolver.js";
+import type { AutoModeDecision } from "./autoModeResolver.js";
 
 export type { RoleTemplates, RuleTemplates } from "./templateLoader.js";
 export type { ExperimentRecord } from "./experimentLogger.js";
 export type { TokenLedgerRecord } from "./tokenLedger.js";
+export type { AutoModeDecision } from "./autoModeResolver.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -27,9 +30,12 @@ export type { TokenLedgerRecord } from "./tokenLedger.js";
 /** プロンプト生成モード */
 export type PromptMode = "full" | "compact" | "minimal";
 
+/** ユーザーが CLI で指定するモード（既存 PromptMode + "auto"） */
+export type RequestedPromptMode = PromptMode | "auto";
+
 /** generatePrompt のオプション */
 export interface GenerateOptions {
-  mode?: PromptMode;
+  mode?: RequestedPromptMode;
   compact?: boolean;
 }
 
@@ -40,9 +46,10 @@ export interface GenerateOptions {
 /**
  * GenerateOptions からプロンプトモードを解決する。
  * 優先順位: options.mode > options.compact > デフォルト("full")
+ * "auto" を受け取った場合は "full" にフォールバック（実際の auto 解決は generatePrompt 内で行う）
  */
 export function resolvePromptMode(options: GenerateOptions): PromptMode {
-  if (options.mode) return options.mode;
+  if (options.mode && options.mode !== "auto") return options.mode;
   if (options.compact) return "compact";
   return "full";
 }
@@ -62,6 +69,7 @@ export interface GenerateResult {
   experimentLogPath?: string;
   tokenLedgerPath?: string;
   tokenReduction?: TokenReduction;
+  autoModeDecision?: AutoModeDecision;
 }
 
 /** task.md から抽出されたセクション */
@@ -105,6 +113,8 @@ interface GenerationLogParams {
   };
   tokenReduction?: TokenReduction;
   promptMode: PromptMode;
+  requestedPromptMode?: RequestedPromptMode;
+  autoModeDecision?: AutoModeDecision;
 }
 
 /** writeGenerationLogs の戻り値 */
@@ -391,6 +401,7 @@ async function writeGenerationLogs(
             },
           }
         : {}),
+    ...(params.requestedPromptMode ? { requestedPromptMode: params.requestedPromptMode } : {}),
   };
   const tokenLedgerPath = await appendTokenLedgerRecord(tokenLedgerRecord);
 
@@ -416,6 +427,15 @@ async function writeGenerationLogs(
       promptChars: promptChars,
       contextMode: "economy",
     },
+    ...(params.requestedPromptMode ? { requestedPromptMode: params.requestedPromptMode } : {}),
+    ...(params.autoModeDecision
+      ? {
+          autoModeDecision: {
+            score: params.autoModeDecision.score,
+            reasons: params.autoModeDecision.reasons,
+          },
+        }
+      : {}),
   };
   const experimentLogPath = await appendExperimentRecord(experimentRecord);
 
@@ -472,7 +492,20 @@ export async function generatePrompt(
   options?: GenerateOptions,
 ): Promise<GenerateResult> {
   const resolvedOutputDir = path.resolve(outputDir ?? DEFAULT_OUTPUT_DIR);
-  const resolvedMode = resolvePromptMode(options ?? {});
+
+  // Determine effective mode: auto mode uses keyword scoring, others use resolvePromptMode
+  let effectiveMode: PromptMode;
+  let autoModeDecision: AutoModeDecision | undefined;
+
+  if (options?.mode === "auto") {
+    // Auto mode: read task → parse → score keywords → resolve mode
+    const taskContentForAuto = await readTextFile(taskFilePath);
+    const parsedTaskForAuto = parseTaskFile(taskContentForAuto);
+    autoModeDecision = selectPromptModeFromTask(parsedTaskForAuto);
+    effectiveMode = autoModeDecision.resolvedMode;
+  } else {
+    effectiveMode = resolvePromptMode(options ?? {});
+  }
 
   let finalPromptContent: string;
   let tokenReduction: TokenReduction | undefined;
@@ -480,7 +513,7 @@ export async function generatePrompt(
   let parsedTask: ParsedTask;
   let publicLogTemplate: string;
 
-  if (resolvedMode === "minimal") {
+  if (effectiveMode === "minimal") {
     // minimal モード: テンプレート不要、直接プロンプトを組み立てる
     taskContent = await readTextFile(taskFilePath);
     parsedTask = parseTaskFile(taskContent);
@@ -488,14 +521,14 @@ export async function generatePrompt(
     finalPromptContent = assembleMinimalPrompt(parsedTask);
   } else {
     // full / compact モード: テンプレートを読み込んでプロンプトを組み立てる
-    const inputs = await loadGenerationInputs(taskFilePath, { compact: resolvedMode === "compact" });
+    const inputs = await loadGenerationInputs(taskFilePath, { compact: effectiveMode === "compact" });
     const contents = buildGenerationContents(inputs);
     taskContent = inputs.taskContent;
     parsedTask = inputs.parsedTask;
     publicLogTemplate = contents.publicLogTemplate;
     finalPromptContent = contents.promptContent;
 
-    if (resolvedMode === "compact") {
+    if (effectiveMode === "compact") {
       // コンパクトモード: compactTransform → trimSection の順で圧縮し、トークン削減量を計算
       const beforeTokens = estimateTokensFromChars(finalPromptContent);
       finalPromptContent = compactTransform(finalPromptContent);
@@ -525,7 +558,8 @@ export async function generatePrompt(
     publicLogTemplate,
     outputPaths: { promptPath, publicLogPath: "" },
     tokenReduction,
-    promptMode: resolvedMode,
+    promptMode: effectiveMode,
+    ...(autoModeDecision ? { requestedPromptMode: "auto" as const, autoModeDecision } : {}),
   });
 
   const publicLogPath = await writePublicLogFile(
@@ -550,5 +584,6 @@ export async function generatePrompt(
     experimentLogPath: logPaths.experimentLogPath,
     tokenLedgerPath: logPaths.tokenLedgerPath,
     tokenReduction,
+    ...(autoModeDecision ? { autoModeDecision } : {}),
   };
 }

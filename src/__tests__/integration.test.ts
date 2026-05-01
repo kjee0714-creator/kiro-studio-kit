@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { mkdtemp, rm, readFile, stat, cp } from "fs/promises";
+import { mkdtemp, rm, readFile, writeFile, stat, cp } from "fs/promises";
 import { tmpdir } from "os";
 import { join, resolve } from "path";
 import type { ExperimentRecord } from "../core/experimentLogger.js";
@@ -272,5 +272,137 @@ describe("Integration: Compact Mode", () => {
     const lastLine = ledgerContent.trim().split("\n").pop() ?? "";
     const ledgerRecord = JSON.parse(lastLine) as TokenLedgerRecord;
     expect(ledgerRecord.compactMode).toBeUndefined();
+  });
+});
+
+
+describe("Integration: Auto Mode", () => {
+  const tempDirs: string[] = [];
+  const templatesDir = resolve("templates");
+
+  async function createTempDir(): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), "auto-integration-"));
+    tempDirs.push(dir);
+    // Copy templates into temp dir so templateLoader can find them
+    await cp(templatesDir, join(dir, "templates"), { recursive: true });
+    return dir;
+  }
+
+  async function createTaskFile(dir: string, content: string): Promise<string> {
+    const taskPath = join(dir, "task.md");
+    await writeFile(taskPath, content, "utf-8");
+    return taskPath;
+  }
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    for (const dir of tempDirs) {
+      await rm(dir, { recursive: true, force: true });
+    }
+    tempDirs.length = 0;
+  });
+
+  it("--mode auto でのプロンプト生成テスト", async () => {
+    const tempDir = await createTempDir();
+    vi.spyOn(process, "cwd").mockReturnValue(tempDir);
+
+    const taskPath = await createTaskFile(tempDir, `# Task
+
+## Goal
+Implement a new feature with API integration and schema migration.
+
+## Scope
+Update the auth module and DB schema.
+
+## Non-goals
+Do not change the UI.
+`);
+
+    const outputDir = join(tempDir, "outputs");
+    const result: GenerateResult = await generatePrompt(taskPath, outputDir, { mode: "auto" });
+
+    // autoModeDecision が存在する
+    expect(result.autoModeDecision).toBeDefined();
+    const decision = result.autoModeDecision ?? { resolvedMode: "", score: 0, reasons: [], requestedMode: "auto" as const };
+
+    // resolvedMode が有効な PromptMode である
+    expect(["full", "compact", "minimal"]).toContain(decision.resolvedMode);
+
+    // score が数値である
+    expect(typeof decision.score).toBe("number");
+
+    // reasons が空でない
+    expect(decision.reasons.length).toBeGreaterThanOrEqual(1);
+
+    // プロンプトファイルが生成される
+    const promptStat = await stat(result.promptPath);
+    expect(promptStat.isFile()).toBe(true);
+  });
+
+  it("auto モード時の実験ログに requestedPromptMode と autoModeDecision が記録されること", async () => {
+    const tempDir = await createTempDir();
+    vi.spyOn(process, "cwd").mockReturnValue(tempDir);
+
+    const taskPath = await createTaskFile(tempDir, `# Task
+
+## Goal
+Refactor the architecture for better design.
+
+## Scope
+Multiple files need changes.
+
+## Non-goals
+No breaking changes.
+`);
+
+    const outputDir = join(tempDir, "outputs");
+    await generatePrompt(taskPath, outputDir, { mode: "auto" });
+
+    // 実験ログを読み込む
+    const expContent = await readFile(join(tempDir, ".studio", "experiments.jsonl"), "utf-8");
+    const lines = expContent.trim().split("\n");
+    const lastRecord = JSON.parse(lines[lines.length - 1]) as ExperimentRecord;
+
+    // requestedPromptMode が "auto" である
+    expect(lastRecord.requestedPromptMode).toBe("auto");
+
+    // autoModeDecision が記録されている
+    expect(lastRecord.autoModeDecision).toBeDefined();
+    const autoDecision = lastRecord.autoModeDecision ?? { score: 0, reasons: [] };
+
+    // score が数値である
+    expect(typeof autoDecision.score).toBe("number");
+
+    // reasons が空でない配列である
+    expect(Array.isArray(autoDecision.reasons)).toBe(true);
+    expect(autoDecision.reasons.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("auto モード時のトークン台帳に requestedPromptMode が記録されること", async () => {
+    const tempDir = await createTempDir();
+    vi.spyOn(process, "cwd").mockReturnValue(tempDir);
+
+    const taskPath = await createTaskFile(tempDir, `# Task
+
+## Goal
+Fix a typo in the README.
+
+## Scope
+Single file change.
+
+## Non-goals
+Nothing else.
+`);
+
+    const outputDir = join(tempDir, "outputs");
+    await generatePrompt(taskPath, outputDir, { mode: "auto" });
+
+    // トークン台帳を読み込む
+    const tlContent = await readFile(join(tempDir, ".studio", "token-ledger.jsonl"), "utf-8");
+    const lines = tlContent.trim().split("\n");
+    const lastRecord = JSON.parse(lines[lines.length - 1]) as TokenLedgerRecord;
+
+    // requestedPromptMode が "auto" である
+    expect(lastRecord.requestedPromptMode).toBe("auto");
   });
 });
