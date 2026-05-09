@@ -1,5 +1,6 @@
 import path from "path";
 import { appendJsonlRecord } from "./jsonlLogger.js";
+import type { PromptMode, RequestedPromptMode } from "./promptGenerator.js";
 
 /** トークン台帳の1レコード */
 export interface TokenLedgerRecord {
@@ -7,6 +8,7 @@ export interface TokenLedgerRecord {
   timestamp: string;
   taskFile: string;
   mode: "economy";
+  promptMode: PromptMode;
   files: {
     taskFileChars: number;
     promptChars: number;
@@ -29,6 +31,12 @@ export interface TokenLedgerRecord {
     deltaReportOnly: boolean;
     stopOnRepeatedFailure: boolean;
   };
+  compactMode?: {
+    enabled: boolean;
+    tokensSaved: number;
+    reductionPercent: number;
+  };
+  requestedPromptMode?: RequestedPromptMode;
 }
 
 /**

@@ -3,6 +3,7 @@ import {
   loadRoleTemplates,
   loadRuleTemplates,
   loadPublicLogTemplate,
+  stripExplanations,
 } from "../core/templateLoader.js";
 
 describe("templateLoader", () => {
@@ -185,6 +186,157 @@ describe("templateLoader", () => {
       await expect(loadPublicLogTemplate()).rejects.toThrow(
         "ファイルが見つかりません",
       );
+    });
+  });
+
+  describe("並列読み込みの結果同一性", () => {
+    it("loadRoleTemplates の並列読み込み結果が全フィールドを正しく返す", async () => {
+      const templates = await loadRoleTemplates();
+
+      // 並列読み込みでも4つのフィールドがすべて存在し、空でないこと
+      expect(Object.keys(templates)).toHaveLength(4);
+      expect(templates.director).toBeTruthy();
+      expect(templates.architect).toBeTruthy();
+      expect(templates.implementer).toBeTruthy();
+      expect(templates.qa).toBeTruthy();
+
+      // 各テンプレートが異なる内容であること（ファイルが正しくマッピングされている）
+      const values = [templates.director, templates.architect, templates.implementer, templates.qa];
+      const uniqueValues = new Set(values);
+      expect(uniqueValues.size).toBe(4);
+    });
+
+    it("loadRuleTemplates の並列読み込み結果が全フィールドを正しく返す", async () => {
+      const templates = await loadRuleTemplates();
+
+      expect(Object.keys(templates)).toHaveLength(4);
+      expect(templates.tokenEconomy).toBeTruthy();
+      expect(templates.antiRunaway).toBeTruthy();
+      expect(templates.qualityGates).toBeTruthy();
+      expect(templates.completionCriteria).toBeTruthy();
+
+      // 各テンプレートが異なる内容であること
+      const values = [templates.tokenEconomy, templates.antiRunaway, templates.qualityGates, templates.completionCriteria];
+      const uniqueValues = new Set(values);
+      expect(uniqueValues.size).toBe(4);
+    });
+
+    it("loadRuleTemplates をオプションなしで呼び出しても正常に動作する（後方互換性）", async () => {
+      const templates = await loadRuleTemplates();
+
+      expect(templates).toHaveProperty("tokenEconomy");
+      expect(templates).toHaveProperty("antiRunaway");
+      expect(templates).toHaveProperty("qualityGates");
+      expect(templates).toHaveProperty("completionCriteria");
+    });
+
+    it("loadRuleTemplates に compact: false を渡した場合、オプションなしと同一の結果を返す", async () => {
+      const withoutOptions = await loadRuleTemplates();
+      const withFalse = await loadRuleTemplates({ compact: false });
+
+      expect(withFalse).toEqual(withoutOptions);
+    });
+
+    it("loadRuleTemplates に compact: true を渡した場合、qualityGates が簡潔化される", async () => {
+      const normal = await loadRuleTemplates();
+      const compact = await loadRuleTemplates({ compact: true });
+
+      // qualityGates 以外は同一
+      expect(compact.tokenEconomy).toBe(normal.tokenEconomy);
+      expect(compact.antiRunaway).toBe(normal.antiRunaway);
+      expect(compact.completionCriteria).toBe(normal.completionCriteria);
+
+      // qualityGates は簡潔化されて短くなる
+      expect(compact.qualityGates.length).toBeLessThan(normal.qualityGates.length);
+    });
+  });
+
+  describe("stripExplanations", () => {
+    it("コードブロック内のコマンドを保持する", () => {
+      const template = `## Quality Gates
+
+\`\`\`bash
+npm run typecheck
+npm run lint
+npm run test
+\`\`\`
+
+### 説明セクション
+
+これは説明文です。
+`;
+      const result = stripExplanations(template);
+
+      expect(result).toContain("npm run typecheck");
+      expect(result).toContain("npm run lint");
+      expect(result).toContain("npm run test");
+      expect(result).toContain("```bash");
+      expect(result).toContain("```");
+    });
+
+    it("説明文（見出しや通常テキスト）を除去する", () => {
+      const template = `## Quality Gates ルール
+
+以下の品質ゲートを実行してください：
+
+\`\`\`bash
+npm run typecheck
+\`\`\`
+
+### 実行ルール
+
+これは説明文です。
+`;
+      const result = stripExplanations(template);
+
+      expect(result).not.toContain("## Quality Gates ルール");
+      expect(result).not.toContain("以下の品質ゲートを実行してください");
+      expect(result).not.toContain("### 実行ルール");
+      expect(result).not.toContain("これは説明文です。");
+    });
+
+    it("箇条書きルールを保持する", () => {
+      const template = `## ルール
+
+- 存在しない script はスキップし報告
+- 失敗時は原因・修正・再実行結果を記録
+- 全結果を最終報告に含める
+
+説明テキスト
+`;
+      const result = stripExplanations(template);
+
+      expect(result).toContain("- 存在しない script はスキップし報告");
+      expect(result).toContain("- 失敗時は原因・修正・再実行結果を記録");
+      expect(result).toContain("- 全結果を最終報告に含める");
+    });
+
+    it("空文字列を渡した場合、空文字列を返す", () => {
+      expect(stripExplanations("")).toBe("");
+    });
+
+    it("コードブロックも箇条書きもない場合、空の結果を返す", () => {
+      const template = `見出しと説明文のみ
+## タイトル
+これは説明です。`;
+      const result = stripExplanations(template);
+
+      // 全行が除去されるので空行のみ
+      expect(result.trim()).toBe("");
+    });
+
+    it("実際の quality-gates.md テンプレートに対して正しく動作する", async () => {
+      const normal = await loadRuleTemplates();
+      const result = stripExplanations(normal.qualityGates);
+
+      // コマンドが保持されている
+      expect(result).toContain("npm run typecheck");
+      expect(result).toContain("npm run lint");
+      expect(result).toContain("npm run test");
+      expect(result).toContain("npm run build");
+
+      // 元のテンプレートより短い
+      expect(result.length).toBeLessThan(normal.qualityGates.length);
     });
   });
 });

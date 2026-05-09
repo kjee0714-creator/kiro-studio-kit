@@ -1,5 +1,6 @@
 import path from "path";
 import { appendJsonlRecord } from "./jsonlLogger.js";
+import type { PromptMode, RequestedPromptMode } from "./promptGenerator.js";
 
 /** 実験ログの1レコード */
 export interface ExperimentRecord {
@@ -7,6 +8,7 @@ export interface ExperimentRecord {
   timestamp: string;
   taskFile: string;
   mode: "studio";
+  promptMode: PromptMode;
   promptPath: string;
   publicLogPath: string;
   tokenLedgerPath: string;
@@ -22,6 +24,17 @@ export interface ExperimentRecord {
     taskChars: number;
     promptChars: number;
     contextMode: "economy";
+  };
+  requestedPromptMode?: RequestedPromptMode;
+  autoModeDecision?: {
+    score: number;
+    reasons: string[];
+  };
+  developmentMemory?: {
+    mode: string;
+    selectedCount: number;
+    selectedIds: string[];
+    totalAvailable: number;
   };
 }
 

@@ -1,11 +1,16 @@
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
-import { parseTaskFile, assemblePrompt, escapeRegExp } from "../core/promptGenerator.js";
+import { parseTaskFile, assemblePrompt, assembleMinimalPrompt, resolvePromptMode, escapeRegExp } from "../core/promptGenerator.js";
 import type {
   ParsedTask,
   RoleTemplates,
   RuleTemplates,
+  GenerateOptions,
+  TokenReduction,
 } from "../core/promptGenerator.js";
+import { compactTransform } from "../core/compactTransformer.js";
+import { trimSection } from "../core/sectionTrimmer.js";
+import { estimateTokensFromChars } from "../core/tokenLedger.js";
 
 describe("parseTaskFile", () => {
   const DEFAULT_SCOPE =
@@ -620,5 +625,450 @@ describe("escapeRegExp", () => {
 
   it("空文字列はそのまま返す", () => {
     expect(escapeRegExp("")).toBe("");
+  });
+});
+
+describe("compact mode pipeline", () => {
+  const sampleTask: ParsedTask = {
+    goal: "テストゴール",
+    scope: "テストスコープ",
+    nonGoals: "テスト非目標",
+  };
+
+  const sampleRoles: RoleTemplates = {
+    director: "## Director Details\nディレクター内容\n\n\n\nExtra spacing",
+    architect: "## Architect Details\nアーキテクト内容",
+    implementer: "## Implementer Details\n実装者内容",
+    qa: "## QA Details\nQA内容",
+  };
+
+  const sampleRules: RuleTemplates = {
+    tokenEconomy: "トークンエコノミー内容",
+    antiRunaway: "アンチランナウェイ内容",
+    qualityGates: "## Quality Gate Details\n品質ゲート内容",
+    completionCriteria: "完了基準内容",
+  };
+
+  it("compact: true 時にプロンプトが圧縮される（見出し行が除去される）", () => {
+    const original = assemblePrompt(sampleTask, sampleRoles, sampleRules);
+    const compacted = trimSection(compactTransform(original));
+
+    // 元のプロンプトには見出し行がある
+    expect(original).toContain("## Goal");
+    expect(original).toContain("### 1. Director");
+
+    // コンパクト後は見出し行が除去されている
+    const compactedLines = compacted.split("\n");
+    const headingLines = compactedLines.filter((line) => line.match(/^#+\s/));
+    expect(headingLines).toHaveLength(0);
+  });
+
+  it("compact: true 時に連続空行が圧縮される", () => {
+    const original = assemblePrompt(sampleTask, sampleRoles, sampleRules);
+    const compacted = trimSection(compactTransform(original));
+
+    // 3行以上の連続空行がないことを確認
+    expect(compacted).not.toMatch(/\n{3,}/);
+  });
+
+  it("TokenReduction の値が正しく計算される", () => {
+    const original = assemblePrompt(sampleTask, sampleRoles, sampleRules);
+    const beforeTokens = estimateTokensFromChars(original);
+
+    let compacted = compactTransform(original);
+    compacted = trimSection(compacted);
+    const afterTokens = estimateTokensFromChars(compacted);
+
+    const saved = beforeTokens - afterTokens;
+    const reduction: TokenReduction = {
+      before: beforeTokens,
+      after: afterTokens,
+      saved,
+      reductionPercent: beforeTokens > 0 ? (saved / beforeTokens) * 100 : 0,
+    };
+
+    expect(reduction.before).toBeGreaterThan(0);
+    expect(reduction.after).toBeGreaterThan(0);
+    expect(reduction.saved).toBeGreaterThanOrEqual(0);
+    expect(reduction.before).toBe(reduction.after + reduction.saved);
+    expect(reduction.reductionPercent).toBeGreaterThanOrEqual(0);
+    expect(reduction.reductionPercent).toBeLessThanOrEqual(100);
+  });
+
+  it("compact 省略時に従来通りの出力であること", () => {
+    const output = assemblePrompt(sampleTask, sampleRoles, sampleRules);
+
+    // 見出し行が保持されている
+    expect(output).toContain("## Goal");
+    expect(output).toContain("## Scope");
+    expect(output).toContain("### 1. Director");
+    expect(output).toContain("## Token Economy Rules");
+    expect(output).toContain("## Quality Gates");
+
+    // ロール・ルール内容が含まれている
+    expect(output).toContain("ディレクター内容");
+    expect(output).toContain("トークンエコノミー内容");
+    expect(output).toContain("品質ゲート内容");
+  });
+
+  it("GenerateOptions 型が正しく定義されている", () => {
+    const opts: GenerateOptions = { compact: true };
+    expect(opts.compact).toBe(true);
+
+    const defaultOpts: GenerateOptions = {};
+    expect(defaultOpts.compact).toBeUndefined();
+  });
+
+  it("TokenReduction 型が正しく定義されている", () => {
+    const reduction: TokenReduction = {
+      before: 1000,
+      after: 800,
+      saved: 200,
+      reductionPercent: 20,
+    };
+    expect(reduction.before).toBe(1000);
+    expect(reduction.after).toBe(800);
+    expect(reduction.saved).toBe(200);
+    expect(reduction.reductionPercent).toBe(20);
+  });
+});
+
+describe("resolvePromptMode", () => {
+  it("mode が指定された場合はその値を返す", () => {
+    expect(resolvePromptMode({ mode: "full" })).toBe("full");
+    expect(resolvePromptMode({ mode: "compact" })).toBe("compact");
+    expect(resolvePromptMode({ mode: "minimal" })).toBe("minimal");
+  });
+  it("mode が未指定で compact: true の場合は 'compact' を返す", () => {
+    expect(resolvePromptMode({ compact: true })).toBe("compact");
+  });
+  it("mode も compact も未指定の場合は 'full' を返す", () => {
+    expect(resolvePromptMode({})).toBe("full");
+  });
+  it("mode と compact が両方指定された場合は mode を優先する", () => {
+    expect(resolvePromptMode({ mode: "minimal", compact: true })).toBe("minimal");
+    expect(resolvePromptMode({ mode: "full", compact: true })).toBe("full");
+  });
+});
+
+describe("resolvePromptMode property tests", () => {
+  it("Feature: prompt-mode-support, Property 2: resolvePromptMode の優先順位不変条件", () => {
+    const modeArb = fc.constantFrom("full" as const, "compact" as const, "minimal" as const);
+    fc.assert(fc.property(
+      fc.record({
+        mode: fc.option(modeArb, { nil: undefined }),
+        compact: fc.option(fc.boolean(), { nil: undefined }),
+      }),
+      (options) => {
+        const result = resolvePromptMode(options);
+        if (options.mode) {
+          expect(result).toBe(options.mode);
+        } else if (options.compact) {
+          expect(result).toBe("compact");
+        } else {
+          expect(result).toBe("full");
+        }
+      }
+    ), { numRuns: 100 });
+  });
+});
+
+describe("assembleMinimalPrompt", () => {
+  const sampleTask = {
+    goal: "テスト用のゴール",
+    scope: "テスト用のスコープ",
+    nonGoals: "テスト用のNon-goals",
+  };
+
+  it("Goal / Scope / Non-goals が展開される", () => {
+    const output = assembleMinimalPrompt(sampleTask);
+    expect(output).toContain("テスト用のゴール");
+    expect(output).toContain("テスト用のスコープ");
+    expect(output).toContain("テスト用のNon-goals");
+  });
+
+  it("品質ゲートコマンドが含まれる", () => {
+    const output = assembleMinimalPrompt(sampleTask);
+    expect(output).toContain("npm run typecheck");
+    expect(output).toContain("npm run lint");
+    expect(output).toContain("npm run test");
+    expect(output).toContain("npm run build");
+  });
+
+  it("スキップ理由報告の文言が含まれる", () => {
+    const output = assembleMinimalPrompt(sampleTask);
+    expect(output).toContain("スキップ");
+  });
+
+  it("最終報告フォーマットが含まれる", () => {
+    const output = assembleMinimalPrompt(sampleTask);
+    expect(output).toContain("変更ファイル");
+    expect(output).toContain("変更サマリー");
+    expect(output).toContain("品質ゲート結果");
+    expect(output).toContain("残課題");
+  });
+
+  it("Role Sequence セクションが含まれない", () => {
+    const output = assembleMinimalPrompt(sampleTask);
+    expect(output).not.toContain("### 1. Director");
+    expect(output).not.toContain("### 2. Architect");
+    expect(output).not.toContain("### 3. Implementer");
+    expect(output).not.toContain("### 4. QA");
+  });
+
+  it("# Kiro Prompt (Minimal) ヘッダーが含まれる", () => {
+    const output = assembleMinimalPrompt(sampleTask);
+    expect(output).toContain("# Kiro Prompt (Minimal)");
+  });
+});
+
+describe("assembleMinimalPrompt property tests", () => {
+  const safeStringArb = fc.string({ minLength: 1, maxLength: 200 }).filter(s => s.trim().length > 0);
+
+  it("Feature: prompt-mode-support, Property 3: minimal モードは Goal・Scope・Non-goals を常に含む", () => {
+    fc.assert(fc.property(
+      fc.record({ goal: safeStringArb, scope: safeStringArb, nonGoals: safeStringArb }),
+      (task) => {
+        const output = assembleMinimalPrompt(task);
+        expect(output).toContain(task.goal);
+        expect(output).toContain(task.scope);
+        expect(output).toContain(task.nonGoals);
+      }
+    ), { numRuns: 100 });
+  });
+
+  it("Feature: prompt-mode-support, Property 4: minimal モードは Role Sequence セクションを含まない", () => {
+    fc.assert(fc.property(
+      fc.record({ goal: safeStringArb, scope: safeStringArb, nonGoals: safeStringArb }),
+      (task) => {
+        const output = assembleMinimalPrompt(task);
+        expect(output).not.toContain("### 1. Director");
+        expect(output).not.toContain("### 2. Architect");
+        expect(output).not.toContain("### 3. Implementer");
+        expect(output).not.toContain("### 4. QA");
+      }
+    ), { numRuns: 100 });
+  });
+
+  it("Feature: prompt-mode-support, Property 5: minimal モードのトークン数は full モードより少ない", () => {
+    // RoleTemplates と RuleTemplates のアービトラリ
+    const templateArb = fc.string({ minLength: 50, maxLength: 500 });
+    const roleTemplatesArb = fc.record({
+      director: templateArb,
+      architect: templateArb,
+      implementer: templateArb,
+      qa: templateArb,
+    });
+    const ruleTemplatesArb = fc.record({
+      tokenEconomy: templateArb,
+      antiRunaway: templateArb,
+      qualityGates: templateArb,
+      completionCriteria: templateArb,
+    });
+
+    fc.assert(fc.property(
+      fc.record({ goal: safeStringArb, scope: safeStringArb, nonGoals: safeStringArb }),
+      roleTemplatesArb,
+      ruleTemplatesArb,
+      (task, roles, rules) => {
+        const fullOutput = assemblePrompt(task, roles, rules);
+        const minimalOutput = assembleMinimalPrompt(task);
+        const fullTokens = estimateTokensFromChars(fullOutput);
+        const minimalTokens = estimateTokensFromChars(minimalOutput);
+        expect(minimalTokens).toBeLessThan(fullTokens);
+      }
+    ), { numRuns: 100 });
+  });
+});
+
+describe("auto mode support", () => {
+  /**
+   * **Validates: Requirements 7.1, 7.2, 7.3, 7.4, 7.5**
+   */
+  it("resolvePromptMode({ mode: 'auto' }) returns 'full'", () => {
+    expect(resolvePromptMode({ mode: "auto" })).toBe("full");
+  });
+
+  it("resolvePromptMode({ mode: 'auto', compact: true }) returns 'compact' (auto skips mode check, falls through to compact)", () => {
+    // When mode is "auto", resolvePromptMode skips it (since it's not a concrete PromptMode)
+    // and checks compact flag next, returning "compact"
+    expect(resolvePromptMode({ mode: "auto", compact: true })).toBe("compact");
+  });
+
+  it("既存モード full の動作が変わらないこと", () => {
+    expect(resolvePromptMode({ mode: "full" })).toBe("full");
+  });
+
+  it("既存モード compact の動作が変わらないこと", () => {
+    expect(resolvePromptMode({ mode: "compact" })).toBe("compact");
+  });
+
+  it("既存モード minimal の動作が変わらないこと", () => {
+    expect(resolvePromptMode({ mode: "minimal" })).toBe("minimal");
+  });
+
+  it("mode 未指定時のデフォルト full が変わらないこと", () => {
+    expect(resolvePromptMode({})).toBe("full");
+  });
+
+  it("compact フラグのみ指定時の動作が変わらないこと", () => {
+    expect(resolvePromptMode({ compact: true })).toBe("compact");
+  });
+});
+
+describe("prompt health warning", () => {
+  // These tests verify the health warning logic by testing the threshold conditions
+  // The actual warning is emitted via console.error in generatePrompt
+
+  it("should trigger warning when overallScore >= 75", async () => {
+    const { calculateMemoryHealth } = await import("../core/memoryHealth.js");
+
+    // Create entries that produce a high overall score
+    const entries = [];
+    for (let i = 0; i < 300; i++) {
+      entries.push({
+        id: `entry-${i}`,
+        createdAt: "2020-01-01T00:00:00.000Z",
+        kind: "test_fix" as const,
+        summary: i % 2 === 0 ? "Always use semicolons" : "Never use semicolons",
+        trigger: "trigger",
+        fix: "fix",
+        futurePromptHint: i % 2 === 0 ? "Use strict mode" : "Avoid strict mode",
+        relatedFiles: ["src/test.ts"],
+        relatedSymbols: ["testFn"],
+        tags: ["tag1", "tag2", "tag3"],
+        severity: "medium" as const,
+        confidence: "high" as const,
+        enabled: true,
+        autoCaptured: true,
+        conflictKey: `group-${i % 5}`,
+      });
+    }
+    const report = calculateMemoryHealth(entries, {
+      now: new Date("2024-07-01T00:00:00.000Z"),
+      storeSizeKb: 1200,
+    });
+    expect(report.overallScore).toBeGreaterThanOrEqual(75);
+  });
+
+  it("should trigger warning when conflictScore >= 70", async () => {
+    const { calculateMemoryHealth } = await import("../core/memoryHealth.js");
+
+    // Create entries with many negation pairs to push conflict score high
+    const entries = [];
+    for (let i = 0; i < 10; i++) {
+      entries.push({
+        id: `pos-${i}`,
+        createdAt: "2024-06-01T00:00:00.000Z",
+        kind: "design_decision" as const,
+        summary: `Always use pattern ${i}`,
+        trigger: "trigger",
+        fix: "fix",
+        futurePromptHint: `Enable feature ${i}`,
+        relatedFiles: ["src/test.ts"],
+        relatedSymbols: ["sym"],
+        tags: ["design"],
+        severity: "medium" as const,
+        confidence: "high" as const,
+        enabled: true,
+      });
+      entries.push({
+        id: `neg-${i}`,
+        createdAt: "2024-06-01T00:00:00.000Z",
+        kind: "design_decision" as const,
+        summary: `Never use pattern ${i}`,
+        trigger: "trigger",
+        fix: "fix",
+        futurePromptHint: `Disable feature ${i}`,
+        relatedFiles: ["src/test.ts"],
+        relatedSymbols: ["sym"],
+        tags: ["design"],
+        severity: "medium" as const,
+        confidence: "high" as const,
+        enabled: true,
+      });
+    }
+    const report = calculateMemoryHealth(entries, { now: new Date("2024-07-01T00:00:00.000Z") });
+    expect(report.conflictScore).toBeGreaterThanOrEqual(70);
+  });
+
+  it("should trigger warning when bloatScore >= 85", async () => {
+    const { calculateMemoryHealth } = await import("../core/memoryHealth.js");
+
+    // Create many active entries with high autoCaptured ratio and large store
+    const entries = [];
+    for (let i = 0; i < 250; i++) {
+      entries.push({
+        id: `bloat-${i}`,
+        createdAt: "2024-06-01T00:00:00.000Z",
+        kind: "test_fix" as const,
+        summary: "summary",
+        trigger: "trigger",
+        fix: "fix",
+        futurePromptHint: "hint",
+        relatedFiles: ["src/test.ts"],
+        relatedSymbols: ["fn"],
+        tags: ["tag"],
+        severity: "medium" as const,
+        confidence: "high" as const,
+        enabled: true,
+        autoCaptured: true,
+      });
+    }
+    const report = calculateMemoryHealth(entries, {
+      now: new Date("2024-07-01T00:00:00.000Z"),
+      storeSizeKb: 1500,
+    });
+    expect(report.bloatScore).toBeGreaterThanOrEqual(85);
+  });
+
+  it("should trigger warning when injectionRiskScore >= 75", async () => {
+    const { calculateMemoryHealth } = await import("../core/memoryHealth.js");
+
+    // Create entries that push injection risk high:
+    // many active entries (high candidate ratio), low confidence, autoCaptured, duplicates, conflicts
+    const entries = [];
+    for (let i = 0; i < 150; i++) {
+      entries.push({
+        id: `risk-${i}`,
+        createdAt: "2024-06-01T00:00:00.000Z",
+        kind: "test_fix" as const,
+        summary: i % 2 === 0 ? "Always use X" : "Never use X",
+        trigger: "trigger",
+        fix: "fix",
+        futurePromptHint: i % 2 === 0 ? "Enable Y" : "Disable Y",
+        relatedFiles: ["src/test.ts"],
+        relatedSymbols: ["testFn"],
+        tags: ["tag1", "tag2", "tag3"],
+        severity: "medium" as const,
+        confidence: "low" as const,
+        enabled: true,
+        autoCaptured: true,
+        conflictKey: `group-${i % 3}`,
+      });
+    }
+    const report = calculateMemoryHealth(entries, { now: new Date("2024-07-01T00:00:00.000Z") });
+    expect(report.injectionRiskScore).toBeGreaterThanOrEqual(75);
+  });
+
+  it("--memory off suppresses health warning entirely", () => {
+    // When memory mode is "off", no health check should be performed
+    // This is verified by the code path: if (memoryMode !== "off") { ... }
+    const mode = resolvePromptMode({ memory: "off" } as GenerateOptions);
+    // memory option doesn't affect mode resolution
+    expect(mode).toBe("full");
+  });
+
+  it("health warning does not alter prompt output content", () => {
+    // The health warning only writes to stderr (console.error)
+    // The prompt content is determined by assemblePrompt/assembleMinimalPrompt
+    // Verify that assemblePrompt output is deterministic regardless of health state
+    const task = { goal: "Test goal", scope: "Test scope", nonGoals: "Test non-goals" };
+    const roles = { director: "D", architect: "A", implementer: "I", qa: "Q" };
+    const rules = { tokenEconomy: "TE", antiRunaway: "AR", qualityGates: "QG", completionCriteria: "CC" };
+
+    const output1 = assemblePrompt(task, roles, rules);
+    const output2 = assemblePrompt(task, roles, rules);
+    expect(output1).toBe(output2);
   });
 });

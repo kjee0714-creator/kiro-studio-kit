@@ -13,14 +13,64 @@ import { appendTokenLedgerRecord, estimateTokensFromChars } from "./tokenLedger.
 import type { TokenLedgerRecord } from "./tokenLedger.js";
 import { expandTemplate } from "./templateExpander.js";
 import type { TemplateVariables } from "./templateExpander.js";
+import { compactTransform } from "./compactTransformer.js";
+import { trimSection } from "./sectionTrimmer.js";
+import { selectPromptModeFromTask } from "./autoModeResolver.js";
+import type { AutoModeDecision } from "./autoModeResolver.js";
+import { injectMemorySection } from "./memoryInjector.js";
+import type { MemoryInjectionMeta } from "./memoryInjector.js";
+import type { MemoryMode } from "./memoryValidator.js";
+import { readMemoryEntries } from "./memoryStore.js";
+import { calculateMemoryHealth } from "./memoryHealth.js";
+import { persistMemorySelections } from "./memoryUsagePersistence.js";
+import { loadExecutionGovernance, renderExecutionGovernanceSection } from "./executionGovernance.js";
+
+export type { MemoryInjectionMeta } from "./memoryInjector.js";
 
 export type { RoleTemplates, RuleTemplates } from "./templateLoader.js";
 export type { ExperimentRecord } from "./experimentLogger.js";
 export type { TokenLedgerRecord } from "./tokenLedger.js";
+export type { AutoModeDecision } from "./autoModeResolver.js";
 
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
+
+/** プロンプト生成モード */
+export type PromptMode = "full" | "compact" | "minimal";
+
+/** ユーザーが CLI で指定するモード（既存 PromptMode + "auto"） */
+export type RequestedPromptMode = PromptMode | "auto";
+
+/** generatePrompt のオプション */
+export interface GenerateOptions {
+  mode?: RequestedPromptMode;
+  compact?: boolean;
+  memory?: MemoryMode;
+}
+
+// ---------------------------------------------------------------------------
+// Mode resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * GenerateOptions からプロンプトモードを解決する。
+ * 優先順位: options.mode > options.compact > デフォルト("full")
+ * "auto" を受け取った場合は "full" にフォールバック（実際の auto 解決は generatePrompt 内で行う）
+ */
+export function resolvePromptMode(options: GenerateOptions): PromptMode {
+  if (options.mode && options.mode !== "auto") return options.mode;
+  if (options.compact) return "compact";
+  return "full";
+}
+
+/** コンパクトモード時のトークン削減情報 */
+export interface TokenReduction {
+  before: number;
+  after: number;
+  saved: number;
+  reductionPercent: number;
+}
 
 /** generatePrompt の戻り値 */
 export interface GenerateResult {
@@ -28,6 +78,20 @@ export interface GenerateResult {
   publicLogPath: string;
   experimentLogPath?: string;
   tokenLedgerPath?: string;
+  tokenReduction?: TokenReduction;
+  autoModeDecision?: AutoModeDecision;
+  memoryMeta?: MemoryInjectionMeta;
+  memoryUsagePersistence?: {
+    updatedCount: number;
+    skippedCount: number;
+    errorCount: number;
+  };
+  governance?: {
+    qualityGatesSource: "file" | "default";
+    stopConditionsSource: "file" | "default";
+    escalationRulesSource: "file" | "default";
+    warningCount: number;
+  };
 }
 
 /** task.md から抽出されたセクション */
@@ -57,12 +121,6 @@ interface GenerationContents {
   publicLogTemplate: string;
 }
 
-/** writeGenerationOutputs の戻り値 */
-interface GenerationOutputPaths {
-  promptPath: string;
-  publicLogPath: string;
-}
-
 /** writeGenerationLogs のパラメータ */
 interface GenerationLogParams {
   runId: string;
@@ -71,7 +129,15 @@ interface GenerationLogParams {
   taskContent: string;
   promptContent: string;
   publicLogTemplate: string;
-  outputPaths: GenerationOutputPaths;
+  outputPaths: {
+    promptPath: string;
+    publicLogPath: string;
+  };
+  tokenReduction?: TokenReduction;
+  promptMode: PromptMode;
+  requestedPromptMode?: RequestedPromptMode;
+  autoModeDecision?: AutoModeDecision;
+  developmentMemory?: MemoryInjectionMeta;
 }
 
 /** writeGenerationLogs の戻り値 */
@@ -210,6 +276,53 @@ ${rules.completionCriteria}
 }
 
 // ---------------------------------------------------------------------------
+// Minimal prompt assembly (pure function)
+// ---------------------------------------------------------------------------
+
+/**
+ * minimal モード用のプロンプトを組み立てる。
+ * テンプレートファイルに依存せず、インラインで文字列を組み立てる。
+ */
+export function assembleMinimalPrompt(task: ParsedTask): string {
+  return `# Kiro Prompt (Minimal)
+
+## Goal
+${task.goal}
+
+## Scope
+${task.scope}
+
+## Non-goals
+${task.nonGoals}
+
+## Implementation Rules
+- 既存のコードパターンと規約に従う
+- 最小差分で実装する（不要な変更を加えない）
+- Scope 外の変更は行わない
+- 同一エラーを2回修正しても解決しない場合は停止する
+- 要件が曖昧な場合は停止して確認する
+
+## Quality Gates
+
+\`\`\`bash
+npm run typecheck
+npm run lint
+npm run test
+npm run build
+\`\`\`
+
+- 存在しない script はスキップし、スキップ理由を報告する
+- 失敗時は原因・修正・再実行結果を記録する
+
+## Required Final Report
+- 変更ファイル一覧
+- 変更サマリー
+- 品質ゲート結果
+- 残課題
+`;
+}
+
+// ---------------------------------------------------------------------------
 // Generation pipeline: step functions
 // ---------------------------------------------------------------------------
 
@@ -218,11 +331,12 @@ ${rules.completionCriteria}
  */
 async function loadGenerationInputs(
   taskFilePath: string,
+  options?: GenerateOptions,
 ): Promise<GenerationInputs> {
   const taskContent = await readTextFile(taskFilePath);
   const parsedTask = parseTaskFile(taskContent);
   const roles = await loadRoleTemplates();
-  const rules = await loadRuleTemplates();
+  const rules = await loadRuleTemplates({ compact: options?.compact });
   const publicLogTemplate = await loadPublicLogTemplate();
   return { taskFilePath, taskContent, parsedTask, roles, rules, publicLogTemplate };
 }
@@ -278,6 +392,7 @@ async function writeGenerationLogs(
     timestamp: params.timestamp,
     taskFile: params.taskFilePath,
     mode: "economy",
+    promptMode: params.promptMode,
     files: { taskFileChars, promptChars, publicLogTemplateChars },
     estimatedTokens: {
       taskFile: estimateTokensFromChars(params.taskContent),
@@ -292,6 +407,24 @@ async function writeGenerationLogs(
       deltaReportOnly: true,
       stopOnRepeatedFailure: true,
     },
+    ...(params.tokenReduction
+      ? {
+          compactMode: {
+            enabled: true,
+            tokensSaved: params.tokenReduction.saved,
+            reductionPercent: params.tokenReduction.reductionPercent,
+          },
+        }
+      : params.promptMode === "minimal"
+        ? {
+            compactMode: {
+              enabled: true,
+              tokensSaved: 0,
+              reductionPercent: 0,
+            },
+          }
+        : {}),
+    ...(params.requestedPromptMode ? { requestedPromptMode: params.requestedPromptMode } : {}),
   };
   const tokenLedgerPath = await appendTokenLedgerRecord(tokenLedgerRecord);
 
@@ -300,6 +433,7 @@ async function writeGenerationLogs(
     timestamp: params.timestamp,
     taskFile: params.taskFilePath,
     mode: "studio",
+    promptMode: params.promptMode,
     promptPath: params.outputPaths.promptPath,
     publicLogPath: params.outputPaths.publicLogPath,
     tokenLedgerPath,
@@ -316,6 +450,16 @@ async function writeGenerationLogs(
       promptChars: promptChars,
       contextMode: "economy",
     },
+    ...(params.requestedPromptMode ? { requestedPromptMode: params.requestedPromptMode } : {}),
+    ...(params.autoModeDecision
+      ? {
+          autoModeDecision: {
+            score: params.autoModeDecision.score,
+            reasons: params.autoModeDecision.reasons,
+          },
+        }
+      : {}),
+    ...(params.developmentMemory ? { developmentMemory: params.developmentMemory } : {}),
   };
   const experimentLogPath = await appendExperimentRecord(experimentRecord);
 
@@ -364,16 +508,128 @@ const DEFAULT_OUTPUT_DIR = "outputs";
  *
  * @param taskFilePath - task.md のパス
  * @param outputDir - 出力ディレクトリ（省略時は "outputs"）
+ * @param options - 生成オプション（省略時は通常モード）
  */
 export async function generatePrompt(
   taskFilePath: string,
   outputDir?: string,
+  options?: GenerateOptions,
 ): Promise<GenerateResult> {
   const resolvedOutputDir = path.resolve(outputDir ?? DEFAULT_OUTPUT_DIR);
-  const inputs = await loadGenerationInputs(taskFilePath);
-  const contents = buildGenerationContents(inputs);
 
-  const promptPath = await writePromptFile(resolvedOutputDir, contents.promptContent);
+  // Determine effective mode: auto mode uses keyword scoring, others use resolvePromptMode
+  let effectiveMode: PromptMode;
+  let autoModeDecision: AutoModeDecision | undefined;
+
+  if (options?.mode === "auto") {
+    // Auto mode: read task → parse → score keywords → resolve mode
+    const taskContentForAuto = await readTextFile(taskFilePath);
+    const parsedTaskForAuto = parseTaskFile(taskContentForAuto);
+    autoModeDecision = selectPromptModeFromTask(parsedTaskForAuto);
+    effectiveMode = autoModeDecision.resolvedMode;
+  } else {
+    effectiveMode = resolvePromptMode(options ?? {});
+  }
+
+  let finalPromptContent: string;
+  let tokenReduction: TokenReduction | undefined;
+  let taskContent: string;
+  let parsedTask: ParsedTask;
+  let publicLogTemplate: string;
+
+  if (effectiveMode === "minimal") {
+    // minimal モード: テンプレート不要、直接プロンプトを組み立てる
+    taskContent = await readTextFile(taskFilePath);
+    parsedTask = parseTaskFile(taskContent);
+    publicLogTemplate = await loadPublicLogTemplate();
+    finalPromptContent = assembleMinimalPrompt(parsedTask);
+  } else {
+    // full / compact モード: テンプレートを読み込んでプロンプトを組み立てる
+    const inputs = await loadGenerationInputs(taskFilePath, { compact: effectiveMode === "compact" });
+    const contents = buildGenerationContents(inputs);
+    taskContent = inputs.taskContent;
+    parsedTask = inputs.parsedTask;
+    publicLogTemplate = contents.publicLogTemplate;
+    finalPromptContent = contents.promptContent;
+
+    if (effectiveMode === "compact") {
+      // コンパクトモード: compactTransform → trimSection の順で圧縮し、トークン削減量を計算
+      const beforeTokens = estimateTokensFromChars(finalPromptContent);
+      finalPromptContent = compactTransform(finalPromptContent);
+      finalPromptContent = trimSection(finalPromptContent);
+      const afterTokens = estimateTokensFromChars(finalPromptContent);
+      const saved = beforeTokens - afterTokens;
+      tokenReduction = {
+        before: beforeTokens,
+        after: afterTokens,
+        saved,
+        reductionPercent: beforeTokens > 0 ? (saved / beforeTokens) * 100 : 0,
+      };
+    }
+  }
+
+  // Memory injection
+  const memoryMode: MemoryMode = options?.memory ?? "auto";
+  const { section: memorySection, meta: memoryMeta, selectedEntries } = await injectMemorySection(
+    taskContent,
+    memoryMode,
+  );
+  if (memorySection) {
+    finalPromptContent = finalPromptContent + "\n" + memorySection;
+  }
+
+  // Usage stats persistence (errors do not block prompt generation)
+  let memoryUsagePersistence: { updatedCount: number; skippedCount: number; errorCount: number } | undefined;
+  if (memoryMode !== "off" && memoryMeta.selectedCount > 0) {
+    try {
+      const persistResult = await persistMemorySelections(selectedEntries);
+      memoryUsagePersistence = {
+        updatedCount: persistResult.updatedIds.length,
+        skippedCount: persistResult.skippedIds.length,
+        errorCount: persistResult.errors.length,
+      };
+    } catch (err) {
+      console.error(`⚠️  Usage stats persistence failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  // Health warning (stderr only, does not alter prompt content)
+  if (memoryMode !== "off") {
+    try {
+      const healthEntries = await readMemoryEntries();
+      const healthReport = calculateMemoryHealth(healthEntries);
+      if (
+        healthReport.overallScore >= 75 ||
+        healthReport.conflictScore >= 70 ||
+        healthReport.bloatScore >= 85 ||
+        healthReport.injectionRiskScore >= 75
+      ) {
+        console.error(`⚠️  Memory health: ${healthReport.level} (score: ${healthReport.overallScore}/100). Run \`ksk memory health\` for details.`);
+      }
+    } catch {
+      // Errors in health check should not stop prompt generation
+    }
+  }
+
+  // Governance section injection (errors never block prompt generation)
+  let governance: GenerateResult["governance"];
+  try {
+    const govConfig = await loadExecutionGovernance();
+    const govSection = renderExecutionGovernanceSection(govConfig);
+    if (govSection) {
+      finalPromptContent = finalPromptContent + "\n" + govSection;
+    }
+    governance = {
+      qualityGatesSource: govConfig.source.qualityGates,
+      stopConditionsSource: govConfig.source.stopConditions,
+      escalationRulesSource: govConfig.source.escalationRules,
+      warningCount: govConfig.warnings.length,
+    };
+  } catch {
+    // Governance loading failure must never stop prompt generation
+  }
+
+  const promptPath = await writePromptFile(resolvedOutputDir, finalPromptContent);
 
   const runId = randomUUID();
   const timestamp = new Date().toISOString();
@@ -381,23 +637,27 @@ export async function generatePrompt(
   const logPaths = await writeGenerationLogs({
     runId,
     timestamp,
-    taskFilePath: inputs.taskFilePath,
-    taskContent: inputs.taskContent,
-    promptContent: contents.promptContent,
-    publicLogTemplate: contents.publicLogTemplate,
+    taskFilePath,
+    taskContent,
+    promptContent: finalPromptContent,
+    publicLogTemplate,
     outputPaths: { promptPath, publicLogPath: "" },
+    tokenReduction,
+    promptMode: effectiveMode,
+    developmentMemory: memoryMeta,
+    ...(autoModeDecision ? { requestedPromptMode: "auto" as const, autoModeDecision } : {}),
   });
 
   const publicLogPath = await writePublicLogFile(
     resolvedOutputDir,
-    contents.publicLogTemplate,
+    publicLogTemplate,
     {
       runId,
       timestamp,
-      taskFile: inputs.taskFilePath,
-      goal: inputs.parsedTask.goal,
-      scope: inputs.parsedTask.scope,
-      nonGoals: inputs.parsedTask.nonGoals,
+      taskFile: taskFilePath,
+      goal: parsedTask.goal,
+      scope: parsedTask.scope,
+      nonGoals: parsedTask.nonGoals,
       promptPath,
       tokenLedgerPath: logPaths.tokenLedgerPath,
       experimentLogPath: logPaths.experimentLogPath,
@@ -409,5 +669,10 @@ export async function generatePrompt(
     publicLogPath,
     experimentLogPath: logPaths.experimentLogPath,
     tokenLedgerPath: logPaths.tokenLedgerPath,
+    tokenReduction,
+    memoryMeta,
+    ...(autoModeDecision ? { autoModeDecision } : {}),
+    ...(memoryUsagePersistence ? { memoryUsagePersistence } : {}),
+    ...(governance ? { governance } : {}),
   };
 }
