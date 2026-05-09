@@ -1,0 +1,226 @@
+# Implementation Plan: Development Memory Lifecycle Management
+
+## Overview
+
+Extend the existing Development Memory system (Phase 1-2) with lifecycle management operations. Implementation proceeds in layers: types/validation first, then store functions, then selector extension, then command handlers, then property-based tests, and finally integration wiring and quality gates.
+
+## Tasks
+
+- [-] 1. Extend DevMemoryEntry type and validator with lifecycle fields
+  - [x] 1.1 Add `deleted?: boolean` and `deletedAt?: string` optional fields to the `DevMemoryEntry` interface in `src/core/memoryValidator.ts`
+    - Add the two optional fields after the existing `expiresAt` field
+    - _Requirements: 9.1, 9.2, 9.5_
+  - [x] 1.2 Extend `validateDevMemoryEntry` to validate the new optional fields
+    - If `deleted` is present and not a boolean, add error "deleted must be a boolean if provided"
+    - If `deletedAt` is present and not a string, add error "deletedAt must be a string if provided"
+    - Omitting both fields must still pass validation (backward compatibility)
+    - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5_
+  - [ ] 1.3 Write property test for validator lifecycle fields (Property 9)
+    - **Property 9: Validator accepts valid optional lifecycle fields**
+    - Generate arbitrary valid DevMemoryEntry objects, add `deleted` as boolean and/or `deletedAt` as string → must pass validation
+    - Generate entries with `deleted` as non-boolean or `deletedAt` as non-string → must fail with descriptive error
+    - Minimum 100 runs with `{ numRuns: 100 }`
+    - **Validates: Requirements 9.1, 9.2, 9.3, 9.4, 9.5**
+
+- [-] 2. Add store-level rewrite and backup functions
+  - [x] 2.1 Implement `rewriteMemoryEntries` in `src/core/memoryStore.ts`
+    - Accept `entries: DevMemoryEntry[]` and optional `storePath`
+    - Validate all entries before writing
+    - Write the complete set as JSONL (overwrite file contents)
+    - Throw Error with details on validation failure
+    - _Requirements: 1.1, 1.2, 2.1, 3.1_
+  - [x] 2.2 Implement `backupMemoryStore` in `src/core/memoryStore.ts`
+    - Read the current store file
+    - Write byte-for-byte copy to `.kiro/ksk/dev-memory.backup-YYYYMMDD.jsonl`
+    - Return the backup file path
+    - Overwrite if same-date backup already exists
+    - _Requirements: 10.1, 10.2, 10.3_
+  - [ ] 2.3 Write property test for rewrite isolation (Property 1)
+    - **Property 1: Rewrite operation isolation**
+    - Generate a store of N entries, pick one entry to mutate (e.g., toggle `enabled`), rewrite, then verify all other entries are unchanged (deep equality)
+    - Minimum 100 runs with `{ numRuns: 100 }`
+    - **Validates: Requirements 1.1, 1.2, 2.1, 3.1**
+  - [ ] 2.4 Write property test for backup exact copy (Property 10)
+    - **Property 10: Backup is an exact copy of store contents**
+    - Generate a store, write it, call `backupMemoryStore`, read backup file, verify byte-for-byte identical content
+    - Minimum 100 runs with `{ numRuns: 100 }`
+    - **Validates: Requirements 10.2**
+
+- [-] 3. Extend filter pipeline with exclusion reasons
+  - [x] 3.1 Add `ExcludedReasons` interface to `src/core/memorySelector.ts`
+    - Define interface with fields: `disabled`, `deleted`, `expired`, `superseded`, `lowConfidence` (all numbers)
+    - Add `excludedReasons?: ExcludedReasons` to `SelectionResult`
+    - _Requirements: 7.1, 7.2_
+  - [x] 3.2 Extend `filterEntries` to exclude `deleted === true` entries and return exclusion breakdown
+    - Add `deleted === true` check as the first exclusion condition (before `enabled` check)
+    - Create a new function `filterEntriesWithReasons` that returns both filtered entries and `ExcludedReasons`
+    - Evaluation order: deleted → disabled → lowConfidence → expired → superseded (first match wins)
+    - _Requirements: 7.1, 7.2, 7.4_
+  - [x] 3.3 Update `selectMemoryEntries` to populate `excludedReasons` in `SelectionResult`
+    - Use `filterEntriesWithReasons` internally
+    - Pass through `excludedReasons` to the result
+    - _Requirements: 7.2, 7.3_
+  - [x] 3.4 Extend `MemoryInjectionMeta` in `src/core/memoryInjector.ts` with `excludedReasons`
+    - Add `excludedReasons?: ExcludedReasons` field to the interface
+    - Populate it from `SelectionResult` in `injectMemorySection`
+    - _Requirements: 7.3_
+  - [ ] 3.5 Write property test for deleted entries excluded from selection (Property 2)
+    - **Property 2: Deleted entries excluded from selection**
+    - Generate entries with some `deleted: true`, run selection with arbitrary task text and mode (auto/full), verify no deleted entry appears in results
+    - Minimum 100 runs with `{ numRuns: 100 }`
+    - **Validates: Requirements 2.3, 7.1**
+  - [ ] 3.6 Write property test for superseded entries excluded from selection (Property 3)
+    - **Property 3: Superseded entries excluded from selection**
+    - Generate entries where entry A's `supersedes` array contains entry B's ID, run selection, verify B never appears in results
+    - Minimum 100 runs with `{ numRuns: 100 }`
+    - **Validates: Requirements 3.3**
+  - [ ] 3.7 Write property test for exclusion category partition (Property 8)
+    - **Property 8: Exclusion category partition**
+    - Generate arbitrary entries, run `filterEntriesWithReasons`, verify sum of all `excludedReasons` counts equals total excluded count, and each excluded entry is in exactly one category
+    - Minimum 100 runs with `{ numRuns: 100 }`
+    - **Validates: Requirements 7.2, 7.4**
+
+- [x] 4. Checkpoint - Ensure all tests pass
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [ ] 5. Implement pure lifecycle functions (prune classification and history derivation)
+  - [ ] 5.1 Implement `classifyPruneCandidates` pure function
+    - Can be placed in `src/core/memorySelector.ts` or a new `src/core/memoryLifecycle.ts` module
+    - Accept `entries: DevMemoryEntry[]` and optional `now?: Date`
+    - Return `PruneClassification[]` with reason for each candidate
+    - Classification order: deleted → disabled → expired → superseded → stale (180 days + low severity + low confidence)
+    - First matching condition wins (no double-counting)
+    - _Requirements: 4.1, 4.3_
+  - [ ] 5.2 Implement `deriveHistory` pure function
+    - Accept `entry: DevMemoryEntry` and `allEntries: DevMemoryEntry[]`
+    - Return `LifecycleEvent[]` sorted chronologically
+    - Derive events: created (from `createdAt`), disabled (if `enabled === false`), deleted (from `deletedAt` or `createdAt`), superseded (from other entries' `supersedes` arrays)
+    - _Requirements: 6.1, 6.2_
+  - [ ] 5.3 Write property test for prune dry-run immutability (Property 4)
+    - **Property 4: Prune dry-run does not mutate store**
+    - Generate entries, deep-clone them, run `classifyPruneCandidates`, verify original entries are deeply equal to the clone
+    - Minimum 100 runs with `{ numRuns: 100 }`
+    - **Validates: Requirements 4.1, 4.5**
+  - [ ] 5.4 Write property test for history chronological order (Property 7)
+    - **Property 7: History events are in chronological order**
+    - Generate an entry and a set of entries (some superseding it), call `deriveHistory`, verify events are sorted by timestamp in non-decreasing order
+    - Minimum 100 runs with `{ numRuns: 100 }`
+    - **Validates: Requirements 6.1**
+
+- [ ] 6. Implement lifecycle command handlers
+  - [ ] 6.1 Implement `handleMemoryDisable` in `src/core/memoryCommands.ts`
+    - Parse `<id>` from args
+    - Read entries, find by ID (error if not found, exit 1)
+    - If already disabled, print warning to stderr, exit 0
+    - Set `enabled = false`, rewrite store
+    - Print success confirmation
+    - _Requirements: 1.1, 1.3, 1.4_
+  - [ ] 6.2 Implement `handleMemoryEnable` in `src/core/memoryCommands.ts`
+    - Parse `<id>` from args
+    - Read entries, find by ID (error if not found, exit 1)
+    - If already enabled, print warning to stderr, exit 0
+    - Set `enabled = true`, rewrite store
+    - Print success confirmation
+    - _Requirements: 1.2, 1.3, 1.4_
+  - [ ] 6.3 Implement `handleMemoryDelete` in `src/core/memoryCommands.ts`
+    - Parse `<id>` from args
+    - Read entries, find by ID (error if not found, exit 1)
+    - Set `deleted = true` and `deletedAt = new Date().toISOString()`
+    - Rewrite store, print success confirmation
+    - _Requirements: 2.1, 2.2_
+  - [ ] 6.4 Implement `handleMemorySupersede` in `src/core/memoryCommands.ts`
+    - Parse `<oldId>` and `<newId>` from args
+    - Read entries, find both by ID (error identifying missing ID if not found, exit 1)
+    - Add `oldId` to `newEntry.supersedes` array (initialize if undefined)
+    - Rewrite store, print success confirmation
+    - _Requirements: 3.1, 3.2_
+  - [ ] 6.5 Implement `handleMemoryPrune` in `src/core/memoryCommands.ts`
+    - Check for `--apply` flag
+    - Read entries, call `classifyPruneCandidates`
+    - Dry-run (no --apply): display candidate counts by category, do not modify store
+    - Apply mode: call `backupMemoryStore`, filter out candidates, rewrite store, report removed count and backup path
+    - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5_
+  - [ ] 6.6 Implement `handleMemoryCompact` in `src/core/memoryCommands.ts`
+    - Call `backupMemoryStore` (abort if fails)
+    - Read entries, filter to `deleted !== true`
+    - Validate each remaining entry (skip invalid with warning)
+    - Rewrite store with filtered entries
+    - Report before/after counts and backup path
+    - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5_
+  - [ ] 6.7 Implement `handleMemoryHistory` in `src/core/memoryCommands.ts`
+    - Parse `<id>` from args
+    - Read entries, find by ID (error if not found, exit 1)
+    - Call `deriveHistory`, display events in chronological order
+    - _Requirements: 6.1, 6.2, 6.3_
+  - [ ] 6.8 Write unit tests for all lifecycle command handlers
+    - Test disable/enable: success, ID not found, already-in-state warning
+    - Test delete: success, ID not found
+    - Test supersede: success, missing oldId, missing newId
+    - Test prune: dry-run output, --apply with backup creation
+    - Test compact: success with before/after counts, backup creation
+    - Test history: success with events, ID not found
+    - _Requirements: 1.1–1.5, 2.1–2.6, 3.1–3.5, 4.1–4.5, 5.1–5.6, 6.1–6.3_
+
+- [ ] 7. Implement compact property tests
+  - [ ] 7.1 Write property test for compact preserves active entries (Property 5)
+    - **Property 5: Compact preserves all active entry data**
+    - Generate a store with mix of deleted and non-deleted entries, run compact logic, verify every non-deleted entry is present in result with all fields unchanged (deep equality)
+    - Minimum 100 runs with `{ numRuns: 100 }`
+    - **Validates: Requirements 5.2, 5.5**
+  - [ ] 7.2 Write property test for compact selection equivalence (Property 6)
+    - **Property 6: Compact produces equivalent selection results**
+    - Generate a store and task text, run `selectMemoryEntries` before and after compact, verify `selected` arrays are equivalent (same entries, same order)
+    - Minimum 100 runs with `{ numRuns: 100 }`
+    - **Validates: Requirements 5.6**
+
+- [ ] 8. Wire new subcommands into CLI router and extend existing commands
+  - [ ] 8.1 Update `handleMemory` router in `src/core/memoryCommands.ts`
+    - Add cases for: `disable`, `enable`, `delete`, `supersede`, `prune`, `compact`, `history`
+    - Update `showMemoryUsage` with new subcommand documentation
+    - _Requirements: 1.1, 1.2, 2.1, 3.1, 4.1, 5.1, 6.1_
+  - [ ] 8.2 Update `handleMemoryList` to exclude deleted entries
+    - Filter out entries where `deleted === true` before display
+    - _Requirements: 2.4_
+  - [ ] 8.3 Update `handleMemorySearch` to exclude deleted entries
+    - Filter out entries where `deleted === true` before searching
+    - _Requirements: 2.5_
+  - [ ] 8.4 Update `handleMemoryInspect` to show lifecycle state
+    - Display `Deleted: true` and `DeletedAt` if entry is deleted
+    - Display "Superseded by: <id>" if another entry supersedes this one
+    - _Requirements: 2.6, 3.4, 3.5_
+  - [ ] 8.5 Extend `handleMemoryStats` with lifecycle statistics
+    - Add deleted entry count
+    - Add superseded entry count
+    - Add average age (days) of active (non-deleted, enabled) entries
+    - Add store file size in KB
+    - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5_
+
+- [ ] 9. Checkpoint - Ensure all tests pass
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [ ] 10. Update public API exports and documentation
+  - [ ] 10.1 Update `src/index.ts` with new exports
+    - Export new types: `ExcludedReasons`, `PruneClassification`, `LifecycleEvent`
+    - Export new functions: `rewriteMemoryEntries`, `backupMemoryStore`, `classifyPruneCandidates`, `deriveHistory`
+    - Export new command handlers: `handleMemoryDisable`, `handleMemoryEnable`, `handleMemoryDelete`, `handleMemorySupersede`, `handleMemoryPrune`, `handleMemoryCompact`, `handleMemoryHistory`
+    - _Requirements: 12.1, 12.4_
+  - [ ] 10.2 Update README.md with new CLI subcommands
+    - Document: `memory disable <id>`, `memory enable <id>`, `memory delete <id>`, `memory supersede <oldId> <newId>`, `memory prune [--apply]`, `memory compact`, `memory history <id>`
+    - _Requirements: 1.1, 2.1, 3.1, 4.1, 5.1, 6.1_
+
+- [ ] 11. Final checkpoint - Ensure all quality gates pass
+  - Run `npm run typecheck` — must pass with zero errors
+  - Run `npm run lint` — must pass with zero errors
+  - Run `npm test` — all tests must pass (including all 10 property tests)
+  - Run `npm run build` — must produce clean dist output
+  - _Requirements: 12.1, 12.2, 12.3, 12.4_
+
+## Notes
+
+- All tasks are required — no optional markers
+- Property tests use `fast-check` (already in devDependencies) with minimum 100 iterations each
+- All property tests should be placed in `src/__tests__/memoryLifecycle.property.test.ts`
+- All unit tests should be placed in `src/__tests__/memoryLifecycle.test.ts`
+- Each task references specific requirements for traceability
+- Checkpoints ensure incremental validation between major implementation phases
+- The implementation uses TypeScript with ESM modules matching the existing codebase patterns

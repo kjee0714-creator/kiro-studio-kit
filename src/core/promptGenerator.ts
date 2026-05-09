@@ -17,6 +17,15 @@ import { compactTransform } from "./compactTransformer.js";
 import { trimSection } from "./sectionTrimmer.js";
 import { selectPromptModeFromTask } from "./autoModeResolver.js";
 import type { AutoModeDecision } from "./autoModeResolver.js";
+import { injectMemorySection } from "./memoryInjector.js";
+import type { MemoryInjectionMeta } from "./memoryInjector.js";
+import type { MemoryMode } from "./memoryValidator.js";
+import { readMemoryEntries } from "./memoryStore.js";
+import { calculateMemoryHealth } from "./memoryHealth.js";
+import { persistMemorySelections } from "./memoryUsagePersistence.js";
+import { loadExecutionGovernance, renderExecutionGovernanceSection } from "./executionGovernance.js";
+
+export type { MemoryInjectionMeta } from "./memoryInjector.js";
 
 export type { RoleTemplates, RuleTemplates } from "./templateLoader.js";
 export type { ExperimentRecord } from "./experimentLogger.js";
@@ -37,6 +46,7 @@ export type RequestedPromptMode = PromptMode | "auto";
 export interface GenerateOptions {
   mode?: RequestedPromptMode;
   compact?: boolean;
+  memory?: MemoryMode;
 }
 
 // ---------------------------------------------------------------------------
@@ -70,6 +80,18 @@ export interface GenerateResult {
   tokenLedgerPath?: string;
   tokenReduction?: TokenReduction;
   autoModeDecision?: AutoModeDecision;
+  memoryMeta?: MemoryInjectionMeta;
+  memoryUsagePersistence?: {
+    updatedCount: number;
+    skippedCount: number;
+    errorCount: number;
+  };
+  governance?: {
+    qualityGatesSource: "file" | "default";
+    stopConditionsSource: "file" | "default";
+    escalationRulesSource: "file" | "default";
+    warningCount: number;
+  };
 }
 
 /** task.md から抽出されたセクション */
@@ -115,6 +137,7 @@ interface GenerationLogParams {
   promptMode: PromptMode;
   requestedPromptMode?: RequestedPromptMode;
   autoModeDecision?: AutoModeDecision;
+  developmentMemory?: MemoryInjectionMeta;
 }
 
 /** writeGenerationLogs の戻り値 */
@@ -436,6 +459,7 @@ async function writeGenerationLogs(
           },
         }
       : {}),
+    ...(params.developmentMemory ? { developmentMemory: params.developmentMemory } : {}),
   };
   const experimentLogPath = await appendExperimentRecord(experimentRecord);
 
@@ -544,6 +568,67 @@ export async function generatePrompt(
     }
   }
 
+  // Memory injection
+  const memoryMode: MemoryMode = options?.memory ?? "auto";
+  const { section: memorySection, meta: memoryMeta, selectedEntries } = await injectMemorySection(
+    taskContent,
+    memoryMode,
+  );
+  if (memorySection) {
+    finalPromptContent = finalPromptContent + "\n" + memorySection;
+  }
+
+  // Usage stats persistence (errors do not block prompt generation)
+  let memoryUsagePersistence: { updatedCount: number; skippedCount: number; errorCount: number } | undefined;
+  if (memoryMode !== "off" && memoryMeta.selectedCount > 0) {
+    try {
+      const persistResult = await persistMemorySelections(selectedEntries);
+      memoryUsagePersistence = {
+        updatedCount: persistResult.updatedIds.length,
+        skippedCount: persistResult.skippedIds.length,
+        errorCount: persistResult.errors.length,
+      };
+    } catch (err) {
+      console.error(`⚠️  Usage stats persistence failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  // Health warning (stderr only, does not alter prompt content)
+  if (memoryMode !== "off") {
+    try {
+      const healthEntries = await readMemoryEntries();
+      const healthReport = calculateMemoryHealth(healthEntries);
+      if (
+        healthReport.overallScore >= 75 ||
+        healthReport.conflictScore >= 70 ||
+        healthReport.bloatScore >= 85 ||
+        healthReport.injectionRiskScore >= 75
+      ) {
+        console.error(`⚠️  Memory health: ${healthReport.level} (score: ${healthReport.overallScore}/100). Run \`ksk memory health\` for details.`);
+      }
+    } catch {
+      // Errors in health check should not stop prompt generation
+    }
+  }
+
+  // Governance section injection (errors never block prompt generation)
+  let governance: GenerateResult["governance"];
+  try {
+    const govConfig = await loadExecutionGovernance();
+    const govSection = renderExecutionGovernanceSection(govConfig);
+    if (govSection) {
+      finalPromptContent = finalPromptContent + "\n" + govSection;
+    }
+    governance = {
+      qualityGatesSource: govConfig.source.qualityGates,
+      stopConditionsSource: govConfig.source.stopConditions,
+      escalationRulesSource: govConfig.source.escalationRules,
+      warningCount: govConfig.warnings.length,
+    };
+  } catch {
+    // Governance loading failure must never stop prompt generation
+  }
+
   const promptPath = await writePromptFile(resolvedOutputDir, finalPromptContent);
 
   const runId = randomUUID();
@@ -559,6 +644,7 @@ export async function generatePrompt(
     outputPaths: { promptPath, publicLogPath: "" },
     tokenReduction,
     promptMode: effectiveMode,
+    developmentMemory: memoryMeta,
     ...(autoModeDecision ? { requestedPromptMode: "auto" as const, autoModeDecision } : {}),
   });
 
@@ -584,6 +670,9 @@ export async function generatePrompt(
     experimentLogPath: logPaths.experimentLogPath,
     tokenLedgerPath: logPaths.tokenLedgerPath,
     tokenReduction,
+    memoryMeta,
     ...(autoModeDecision ? { autoModeDecision } : {}),
+    ...(memoryUsagePersistence ? { memoryUsagePersistence } : {}),
+    ...(governance ? { governance } : {}),
   };
 }

@@ -30,6 +30,12 @@ export interface ExperimentRecord {
     score: number;
     reasons: string[];
   };
+  developmentMemory?: {
+    mode: string;
+    selectedCount: number;
+    selectedIds: string[];
+    totalAvailable: number;
+  };
 }
 
 /**

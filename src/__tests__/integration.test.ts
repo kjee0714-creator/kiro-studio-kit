@@ -198,7 +198,8 @@ describe("Integration: Compact Mode", () => {
 
     const promptContent = await readFile(result.promptPath, "utf-8");
     const lines = promptContent.split("\n");
-    const headingLines = lines.filter((line) => /^#+\s/.test(line));
+    // Governance section headings are expected (added after compact transform)
+    const headingLines = lines.filter((line) => /^#+\s/.test(line) && !line.includes("Execution Governance") && !line.includes("Quality Gates") && !line.includes("Stop Conditions") && !line.includes("Escalation Rules"));
 
     expect(headingLines).toHaveLength(0);
   });

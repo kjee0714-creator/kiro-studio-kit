@@ -170,6 +170,7 @@ The decision is explainable and logged for later analysis.
 | `<task-file>` | 入力する task.md のパス（必須） | — |
 | `--out <dir>` | 出力ディレクトリ | `outputs/` |
 | `--mode <full\|compact\|minimal\|auto>` | プロンプト生成モードを指定する | `full` |
+| `--memory <auto\|off\|full>` | Development Memory 注入モード | `auto` |
 | `--compact` | コンパクトモードでプロンプトを生成（後方互換、`--mode compact` と同等） | 無効 |
 
 **出力例（通常モード）:**
@@ -643,6 +644,156 @@ npm run build       # TypeScript コンパイル
 - **品質ゲート必須** — typecheck / lint / test / build を必ず通す
 - **トークン消費を抑える** — 必要最小限のコンテキストで効率的に作業する
 - **公開可能なログを残す** — 再現可能な作業記録を標準化する
+
+---
+
+## Development Memory
+
+KSK can store short development lessons from previous fixes and inject relevant ones into future prompts.
+
+Default mode is `auto`.
+
+- `auto`: selects up to 5 relevant memories (scored by file/symbol/tag matches) with a 2000-char cap
+- `off`: disables memory injection entirely
+- `full`: injects more memories (up to 10000 chars) for debugging/research
+
+This feature is designed to prevent repeated mistakes without bloating prompts.
+For very large or sensitive projects, use `--memory off`.
+
+### CLI Commands
+
+```bash
+# Add a memory entry
+kiro-studio-kit memory add \
+  --kind test_fix \
+  --summary "Context Budgetではclamp後値を正とする" \
+  --trigger "maxRecentChars:100を期待してテストが失敗した" \
+  --fix "期待値をbudget.maxRecentChars基準に変更した" \
+  --hint "Context Budget関連のテストではclamp後のbudget値を正として扱うこと" \
+  --files src/helpers/compute.ts \
+  --symbols computeBudget \
+  --tags context-budget,test \
+  --severity medium \
+  --confidence high
+
+# List stored memories (excludes deleted)
+kiro-studio-kit memory list
+
+# Search memories (excludes deleted)
+kiro-studio-kit memory search "context budget"
+
+# Disable a memory entry (excluded from prompt injection)
+kiro-studio-kit memory disable <id>
+
+# Re-enable a disabled memory entry
+kiro-studio-kit memory enable <id>
+
+# Soft-delete a memory entry (recoverable until pruned/compacted)
+kiro-studio-kit memory delete <id>
+
+# Mark an older entry as superseded by a newer one
+kiro-studio-kit memory supersede <oldId> <newId>
+
+# Show prune candidates (dry-run, no changes)
+kiro-studio-kit memory prune
+
+# Actually remove prune candidates (creates backup first)
+kiro-studio-kit memory prune --apply
+
+# Compact store: permanently remove deleted entries (creates backup first)
+kiro-studio-kit memory compact
+
+# View lifecycle history of an entry
+kiro-studio-kit memory history <id>
+```
+
+### Memory Kinds
+
+`test_fix` | `type_fix` | `lint_fix` | `build_fix` | `schema_fix` | `behavior_change` | `design_decision` | `gotcha`
+
+### Storage
+
+Memories are stored in `.kiro/ksk/dev-memory.jsonl` (auto-created).
+
+### Security Note
+
+Do not store API keys, passwords, private keys, customer PII, or other secrets in Dev Memory.
+KSK provides lightweight pattern detection (warns on `sk-`, `BEGIN PRIVATE KEY`, `password=`, `api_key`, `secret`) but does not guarantee complete secret detection.
+If needed, manually edit or delete entries from the JSONL file.
+
+### Memory Usage Visibility
+
+KSK provides observability into how memories are selected and injected into prompts.
+
+#### `--memory-report` flag
+
+Add `--memory-report` to the `prompt` command to see a detailed memory usage report after generation:
+
+```bash
+kiro-studio-kit prompt ./task.md --mode auto --memory-report
+```
+
+Example output:
+
+```
+✅ プロンプト: outputs/kiro-prompt.md
+✅ 公開ログテンプレ: outputs/public-log-template.md
+
+📊 Memory Report
+  Mode: auto | Selected: 2 / 8 available
+  Injected chars: 420 | Top score: 9
+
+  #1 [test_fix] Fix vitest mock isolation (score: 9)
+     Reasons: file:memorySelector.ts(+5), tag:vitest(+3), recent:within_30d(+1)
+  #2 [gotcha] ESM import requires .js extension (score: 5)
+     Reasons: tag:esm(+3), severity:medium(+1), recent:within_30d(+1)
+```
+
+#### `memory inspect <id>`
+
+View full details of a single memory entry by its ID:
+
+```bash
+kiro-studio-kit memory inspect 550e8400-e29b-41d4-a716-446655440000
+```
+
+Displays all fields including kind, severity, confidence, trigger, fix, related files/symbols, and tags.
+
+#### `memory stats`
+
+View aggregate statistics about the memory store:
+
+```bash
+kiro-studio-kit memory stats
+```
+
+Example output:
+
+```
+Development Memory Stats
+
+Total entries: 12
+Enabled: 10
+Disabled: 2
+Low confidence: 1
+Expired: 0
+
+By kind:
+  test_fix: 5
+  type_fix: 3
+  gotcha: 2
+  lint_fix: 2
+
+By severity:
+  medium: 7
+  high: 3
+  low: 2
+
+Newest:
+  2024-12-01 test_fix Fix vitest mock isolation
+Oldest:
+  2024-06-15 gotcha ESM import requires .js extension
+```
 
 ---
 
